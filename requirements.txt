@@ -7,3 +7,5 @@ altair>=5.0
 plotly>=6.0
 soundfile>=0.12
 audioread>=3.0
+music21>=9.7
+certifi>=2024.8.30
