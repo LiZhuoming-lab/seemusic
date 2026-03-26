@@ -12,10 +12,19 @@ import soundfile as sf
 
 from spectral_tool.assistant import (
     annotate_event_interaction_levels,
+    annotate_event_similarity_groups,
     build_assistant_overlay_component,
     build_event_assistant_payload,
 )
-from spectral_tool.analysis import AnalysisConfig, _load_audio, _resolve_novelty_weights, analyze_audio, build_audio_excerpt_wav
+from spectral_tool.analysis import (
+    CANDIDATE_BOUNDARY_LABEL,
+    AnalysisConfig,
+    _boundary_state_change_score,
+    _load_audio,
+    _resolve_novelty_weights,
+    analyze_audio,
+    build_audio_excerpt_wav,
+)
 from spectral_tool.visualization import (
     build_local_waveform_chart,
     build_synced_overview_player_html,
@@ -68,6 +77,8 @@ class AnalysisTestCase(unittest.TestCase):
             {
                 "rms",
                 "spectral_centroid_hz",
+                "band_energy_ratio",
+                "high_band_ratio",
                 "rolloff_hz",
                 "flatness",
                 "spectral_flux",
@@ -147,6 +158,55 @@ class AnalysisTestCase(unittest.TestCase):
         weights = _resolve_novelty_weights(config)
 
         self.assertEqual(weights, (0.45, 0.30, 0.15, 0.10))
+
+    def test_timbre_soundscape_mode_uses_extra_timbre_features(self) -> None:
+        sr = 22050
+        segment_duration = 2.0
+        sample_count = int(sr * segment_duration)
+        time_axis = np.linspace(0.0, segment_duration, sample_count, endpoint=False)
+        rng = np.random.default_rng(19)
+
+        low_tone = 0.14 * np.sin(2 * np.pi * 180 * time_axis)
+        bright_noise = 0.05 * rng.normal(size=sample_count) + 0.08 * np.sin(2 * np.pi * 3400 * time_axis)
+        audio = np.concatenate([low_tone, bright_noise]).astype(np.float32)
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            path = Path(temporary_dir) / "timbre-mode.wav"
+            sf.write(path, audio, sr)
+
+            common_kwargs = dict(
+                target_sr=22050,
+                n_fft=2048,
+                hop_length=512,
+                smooth_sigma=1.0,
+                threshold_sigma=0.8,
+                prominence_sigma=0.5,
+                min_event_distance_sec=0.8,
+                context_window_sec=1.0,
+                novelty_weight_cosine=0.45,
+                novelty_weight_flux=0.30,
+                novelty_weight_onset=0.15,
+                novelty_weight_rms=0.10,
+            )
+
+            balanced = analyze_audio(
+                path,
+                config=AnalysisConfig(
+                    event_model_preset="balanced_default",
+                    **common_kwargs,
+                ),
+            )
+            timbre = analyze_audio(
+                path,
+                config=AnalysisConfig(
+                    event_model_preset="timbre_soundscape",
+                    **common_kwargs,
+                ),
+            )
+
+        self.assertIn("band_energy_ratio", timbre["feature_table"].columns)
+        self.assertIn("high_band_ratio", timbre["feature_table"].columns)
+        self.assertFalse(np.allclose(balanced["novelty"], timbre["novelty"]))
 
     def test_build_audio_excerpt_wav_returns_playable_bytes(self) -> None:
         sr = 22050
@@ -289,13 +349,13 @@ class AnalysisTestCase(unittest.TestCase):
                 "dominant_freqs": "312Hz, 1288Hz, 3810Hz",
                 "is_major_boundary": True,
                 "interaction_priority": "strong",
-                "auto_labels": "高频扩展 | 段落转换",
+                "auto_labels": f"高频扩展 | {CANDIDATE_BOUNDARY_LABEL}",
             },
-            effective_label_text="高频扩展 | 段落转换",
+            effective_label_text=f"高频扩展 | {CANDIDATE_BOUNDARY_LABEL}",
         )
 
         self.assertIn("像不像边界", payload["question"])
-        self.assertEqual(payload["role_text"], "段落转折候选")
+        self.assertEqual(payload["role_text"], CANDIDATE_BOUNDARY_LABEL)
         self.assertIn("候选", payload["draft"])
         self.assertEqual(len(payload["primary_actions"]), 3)
         self.assertIn("看它是不是边界", [item["label"] for item in payload["primary_actions"]])
@@ -357,8 +417,8 @@ class AnalysisTestCase(unittest.TestCase):
                     "strength": 1.31,
                     "prominence": 0.86,
                     "is_major_boundary": True,
-                    "auto_labels": "高频扩展 | 段落转换",
-                    "effective_labels": "高频扩展 | 段落转换",
+                    "auto_labels": f"高频扩展 | {CANDIDATE_BOUNDARY_LABEL}",
+                    "effective_labels": f"高频扩展 | {CANDIDATE_BOUNDARY_LABEL}",
                 },
             ]
         )
@@ -376,6 +436,56 @@ class AnalysisTestCase(unittest.TestCase):
             "strong",
         )
 
+    def test_annotate_event_similarity_groups_clusters_highly_similar_events(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "event_id": 1,
+                    "post_rms": 0.121,
+                    "post_centroid_hz": 2210.0,
+                    "post_bandwidth_hz": 1460.0,
+                    "post_rolloff_hz": 5280.0,
+                    "post_low_ratio": 0.20,
+                    "post_mid_ratio": 0.49,
+                    "post_high_ratio": 0.31,
+                    "post_flatness": 0.14,
+                },
+                {
+                    "event_id": 2,
+                    "post_rms": 0.122,
+                    "post_centroid_hz": 2225.0,
+                    "post_bandwidth_hz": 1455.0,
+                    "post_rolloff_hz": 5300.0,
+                    "post_low_ratio": 0.201,
+                    "post_mid_ratio": 0.488,
+                    "post_high_ratio": 0.311,
+                    "post_flatness": 0.141,
+                },
+                {
+                    "event_id": 3,
+                    "post_rms": 0.042,
+                    "post_centroid_hz": 620.0,
+                    "post_bandwidth_hz": 380.0,
+                    "post_rolloff_hz": 1300.0,
+                    "post_low_ratio": 0.72,
+                    "post_mid_ratio": 0.23,
+                    "post_high_ratio": 0.05,
+                    "post_flatness": 0.03,
+                },
+            ]
+        )
+
+        annotated = annotate_event_similarity_groups(frame, threshold=0.90)
+
+        group_1 = int(annotated.loc[annotated["event_id"] == 1, "similarity_group_id"].iloc[0])
+        group_2 = int(annotated.loc[annotated["event_id"] == 2, "similarity_group_id"].iloc[0])
+        group_3 = int(annotated.loc[annotated["event_id"] == 3, "similarity_group_id"].iloc[0])
+
+        self.assertEqual(group_1, group_2)
+        self.assertNotEqual(group_1, group_3)
+        self.assertEqual(int(annotated.loc[annotated["event_id"] == 1, "similarity_group_size"].iloc[0]), 2)
+        self.assertGreaterEqual(float(annotated.loc[annotated["event_id"] == 1, "max_similarity_in_group"].iloc[0]), 0.90)
+
     def test_build_assistant_overlay_component_targets_parent_document(self) -> None:
         payload = build_event_assistant_payload(
             {
@@ -391,10 +501,10 @@ class AnalysisTestCase(unittest.TestCase):
                 "channel_bias": "左侧偏强",
                 "dominant_freqs": "312Hz, 1288Hz, 3810Hz",
                 "is_major_boundary": True,
-                "auto_labels": "高频扩展 | 段落转换",
-                "descriptor": "高频扩展；段落转换",
+                "auto_labels": f"高频扩展 | {CANDIDATE_BOUNDARY_LABEL}",
+                "descriptor": f"高频扩展；{CANDIDATE_BOUNDARY_LABEL}",
             },
-            effective_label_text="高频扩展 | 段落转换",
+            effective_label_text=f"高频扩展 | {CANDIDATE_BOUNDARY_LABEL}",
         )
 
         html = build_assistant_overlay_component(3, payload)
@@ -411,6 +521,61 @@ class AnalysisTestCase(unittest.TestCase):
         self.assertIn("Collaborative Analysis", html)
         self.assertIn("重置位置", html)
         self.assertIn("拖动可移动", html)
+        self.assertIn(CANDIDATE_BOUNDARY_LABEL, html)
+
+    def test_boundary_state_change_score_rejects_pure_local_spike(self) -> None:
+        before = {
+            "rms": 0.12,
+            "centroid_hz": 1800.0,
+            "bandwidth_hz": 1200.0,
+            "rolloff_hz": 5200.0,
+            "flatness": 0.10,
+            "low_ratio": 0.22,
+            "mid_ratio": 0.53,
+            "high_ratio": 0.25,
+        }
+        after = {
+            "rms": 0.17,
+            "centroid_hz": 1830.0,
+            "bandwidth_hz": 1215.0,
+            "rolloff_hz": 5260.0,
+            "flatness": 0.11,
+            "low_ratio": 0.21,
+            "mid_ratio": 0.52,
+            "high_ratio": 0.27,
+        }
+
+        score, is_clear_change = _boundary_state_change_score(before, after)
+
+        self.assertLess(score, 1.05)
+        self.assertFalse(is_clear_change)
+
+    def test_boundary_state_change_score_accepts_clear_state_shift(self) -> None:
+        before = {
+            "rms": 0.09,
+            "centroid_hz": 920.0,
+            "bandwidth_hz": 640.0,
+            "rolloff_hz": 2100.0,
+            "flatness": 0.05,
+            "low_ratio": 0.62,
+            "mid_ratio": 0.30,
+            "high_ratio": 0.08,
+        }
+        after = {
+            "rms": 0.18,
+            "centroid_hz": 2700.0,
+            "bandwidth_hz": 1560.0,
+            "rolloff_hz": 6900.0,
+            "flatness": 0.18,
+            "low_ratio": 0.21,
+            "mid_ratio": 0.43,
+            "high_ratio": 0.36,
+        }
+
+        score, is_clear_change = _boundary_state_change_score(before, after)
+
+        self.assertGreaterEqual(score, 1.05)
+        self.assertTrue(is_clear_change)
 
 
 if __name__ == "__main__":

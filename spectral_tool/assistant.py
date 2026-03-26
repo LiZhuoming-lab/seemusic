@@ -6,7 +6,7 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
-from .analysis import split_label_text
+from .analysis import CANDIDATE_BOUNDARY_LABEL, split_label_text
 
 _FOCUS_PREFERENCE_OPTIONS = [
     {"key": "sustained", "label": "更重视持续变化"},
@@ -32,6 +32,17 @@ _INTERACTION_PRIORITY_META = {
         "depth": "full",
     },
 }
+
+_SIMILARITY_FEATURE_COLUMNS = [
+    "post_rms",
+    "post_centroid_hz",
+    "post_bandwidth_hz",
+    "post_rolloff_hz",
+    "post_low_ratio",
+    "post_mid_ratio",
+    "post_high_ratio",
+    "post_flatness",
+]
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -88,7 +99,7 @@ def annotate_event_interaction_levels(event_table: pd.DataFrame) -> pd.DataFrame
     prominence_rank = prominences.rank(method="average", pct=True)
     label_source = annotated["effective_labels"] if "effective_labels" in annotated.columns else annotated["auto_labels"]
     label_bonus = label_source.astype(str).apply(
-        lambda value: 0.12 if "段落转换" in value else 0.06 if any(token in value for token in ["高频扩展", "能量增强", "能量减弱"]) else 0.0
+        lambda value: 0.12 if CANDIDATE_BOUNDARY_LABEL in value else 0.06 if any(token in value for token in ["高频扩展", "能量增强", "能量减弱"]) else 0.0
     )
     major_bonus = annotated["is_major_boundary"].astype(bool).astype(float) * 0.18
     interaction_score = 0.48 * strength_rank + 0.34 * prominence_rank + label_bonus + major_bonus
@@ -111,7 +122,7 @@ def annotate_event_interaction_levels(event_table: pd.DataFrame) -> pd.DataFrame
             is_major = bool(row["is_major_boundary"])
             if is_major or row_index in strong_indices or score >= strong_cut:
                 priorities.append("strong")
-            elif score <= weak_cut and "段落转换" not in labels and not is_major:
+            elif score <= weak_cut and CANDIDATE_BOUNDARY_LABEL not in labels and not is_major:
                 priorities.append("weak")
             else:
                 priorities.append("medium")
@@ -123,6 +134,71 @@ def annotate_event_interaction_levels(event_table: pd.DataFrame) -> pd.DataFrame
     annotated["interaction_depth"] = annotated["interaction_priority"].map(
         lambda value: _priority_meta(str(value))["depth"]
     )
+    return annotated
+
+
+def annotate_event_similarity_groups(
+    event_table: pd.DataFrame,
+    threshold: float = 0.90,
+) -> pd.DataFrame:
+    annotated = event_table.copy()
+    if annotated.empty:
+        annotated["similarity_group_id"] = pd.Series(dtype="int64")
+        annotated["similarity_group_label"] = pd.Series(dtype="object")
+        annotated["similarity_group_size"] = pd.Series(dtype="int64")
+        annotated["max_similarity_in_group"] = pd.Series(dtype="float64")
+        return annotated
+
+    available_columns = [column for column in _SIMILARITY_FEATURE_COLUMNS if column in annotated.columns]
+    if not available_columns:
+        annotated["similarity_group_id"] = np.arange(1, len(annotated) + 1, dtype=int)
+        annotated["similarity_group_label"] = [f"相似组 {index}" for index in range(1, len(annotated) + 1)]
+        annotated["similarity_group_size"] = 1
+        annotated["max_similarity_in_group"] = 1.0
+        return annotated
+
+    feature_frame = annotated[available_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    feature_values = feature_frame.to_numpy(dtype=np.float64)
+    means = np.mean(feature_values, axis=0)
+    stds = np.std(feature_values, axis=0)
+    safe_stds = np.where(stds < 1e-8, 1.0, stds)
+    normalized = (feature_values - means) / safe_stds
+    norms = np.linalg.norm(normalized, axis=1, keepdims=True)
+    normalized = normalized / np.maximum(norms, 1e-8)
+    similarity_matrix = np.clip(normalized @ normalized.T, -1.0, 1.0)
+
+    threshold = float(np.clip(threshold, 0.0, 1.0))
+    group_ids = np.full(len(annotated), -1, dtype=int)
+    group_index = 0
+    for row_index in range(len(annotated)):
+        if group_ids[row_index] != -1:
+            continue
+        group_index += 1
+        stack = [row_index]
+        group_ids[row_index] = group_index
+        while stack:
+            current = stack.pop()
+            neighbors = np.where(similarity_matrix[current] >= threshold)[0]
+            for neighbor in neighbors:
+                if group_ids[neighbor] == -1:
+                    group_ids[neighbor] = group_index
+                    stack.append(int(neighbor))
+
+    group_sizes = pd.Series(group_ids).map(pd.Series(group_ids).value_counts()).astype(int).to_numpy()
+    max_similarity_in_group: list[float] = []
+    for row_index, group_id in enumerate(group_ids):
+        member_indices = np.where(group_ids == group_id)[0]
+        if member_indices.size <= 1:
+            max_similarity_in_group.append(1.0)
+            continue
+        member_scores = similarity_matrix[row_index, member_indices]
+        peer_scores = member_scores[member_indices != row_index]
+        max_similarity_in_group.append(float(np.max(peer_scores)) if peer_scores.size else 1.0)
+
+    annotated["similarity_group_id"] = group_ids.astype(int)
+    annotated["similarity_group_label"] = [f"相似组 {group_id}" for group_id in group_ids]
+    annotated["similarity_group_size"] = group_sizes
+    annotated["max_similarity_in_group"] = np.round(np.asarray(max_similarity_in_group, dtype=np.float64), 4)
     return annotated
 
 
@@ -156,7 +232,7 @@ def _build_primary_actions(
         ]
         if any(label in labels for label in ["噪声侵入", "音色突变", "高频扩展"]):
             follow_up_actions[1] = {"key": "timbre", "label": "再看音色是不是变了"}
-        if is_major_boundary or "段落转换" in labels:
+        if is_major_boundary or CANDIDATE_BOUNDARY_LABEL in labels:
             return [
                 {
                     "key": "overview",
@@ -212,7 +288,7 @@ def _build_primary_actions(
         },
     ]
 
-    if is_major_boundary or "段落转换" in labels:
+    if is_major_boundary or CANDIDATE_BOUNDARY_LABEL in labels:
         actions.append(
             {
                 "key": "boundary_focus",
@@ -282,7 +358,7 @@ def _build_path_results(
     is_major_boundary: bool,
 ) -> dict[str, dict[str, object]]:
     timbre_label, timbre_hint = _timbre_phrase(labels, high_ratio, flatness)
-    boundary_line = "它已经被系统列成强边界候选。" if is_major_boundary else "它目前还没有被系统列成强边界候选。"
+    boundary_line = "它已经被系统列成候选段落边界。" if is_major_boundary else "它目前还没有被系统列成候选段落边界。"
     descriptor_line = descriptor or "当前规则摘要没有给出额外提示。"
 
     return {
@@ -442,7 +518,7 @@ def build_event_assistant_payload(
     interaction_priority = str(event_row.get("interaction_priority", "strong" if is_major_boundary else "medium"))
     priority_meta = _priority_meta(interaction_priority)
 
-    role_text = "段落转折候选" if is_major_boundary else "局部变化候选"
+    role_text = CANDIDATE_BOUNDARY_LABEL if is_major_boundary else "局部变化候选"
     label_text = "、".join(labels)
     opening_prompt = _opening_prompt(labels, is_major_boundary)
     primary_actions = _build_primary_actions(labels, is_major_boundary, interaction_priority)
@@ -519,7 +595,6 @@ def build_event_assistant_payload(
         "preference_focus_options": _FOCUS_PREFERENCE_OPTIONS,
         "preference_term_options": _TERM_PREFERENCE_OPTIONS,
     }
-
 
 def build_assistant_overlay_component(
     active_event_id: int,

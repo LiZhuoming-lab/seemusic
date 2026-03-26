@@ -9,10 +9,12 @@ import streamlit.components.v1 as components
 
 from spectral_tool.assistant import (
     annotate_event_interaction_levels,
+    annotate_event_similarity_groups,
     build_assistant_overlay_component,
     build_event_assistant_payload,
 )
 from spectral_tool.analysis import (
+    CANDIDATE_BOUNDARY_LABEL,
     AnalysisConfig,
     analyze_audio,
     build_audio_excerpt_wav,
@@ -58,12 +60,33 @@ EVENT_MODEL_PRESETS = {
     },
 }
 
+OPERATION_RESULT_OPTIONS = [
+    "保留",
+    "删除",
+    f"改成{CANDIDATE_BOUNDARY_LABEL}",
+    "改成局部事件",
+    "暂不处理",
+]
+
 
 def _format_weight_percent(weight: float) -> int:
     return int(round(float(weight) * 100))
 
 
 def _novelty_explanation(config: AnalysisConfig) -> str:
+    extra_note = ""
+    if config.event_model_preset == "timbre_soundscape":
+        extra_note = """
+在“音色 / 声景模式”里，上面的“频谱形态差异”这一项还会额外参考：
+
+- `spectral centroid`：看频谱重心有没有整体移动
+- `band energy ratio`：看不同频带之间的能量关系有没有改写
+- `高频占比`：看高频材料是否明显抬升或退去
+- `flatness`：看声音是否更趋向噪声质地
+
+这样可以更敏感地抓到“新音色 / 新材质 / 新频谱状态”的进入。
+"""
+
     return f"""
 自动事件点来自“频谱新颖度检测”，它看的是相邻时刻之间的频谱是否发生了明显变化，而不是只看某一个单独音高。
 
@@ -73,6 +96,7 @@ def _novelty_explanation(config: AnalysisConfig) -> str:
 - `{_format_weight_percent(config.novelty_weight_rms)}%` 能量突变 `RMS delta`：看整体响度是否突然变化
 
 当这一条“新颖度曲线”超过阈值并形成峰值时，系统就会在那个时间点标成一个候选事件。
+{extra_note}
 """
 
 
@@ -85,6 +109,31 @@ def _analysis_signature(audio_bytes: bytes, config: AnalysisConfig, channel_mode
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _ensure_event_annotation_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    ensured = frame.copy()
+    if "manual_labels" not in ensured.columns:
+        if "auto_labels" in ensured.columns:
+            ensured["manual_labels"] = ensured["auto_labels"].astype(str)
+        else:
+            ensured["manual_labels"] = pd.Series(dtype="object")
+    if "review_notes" not in ensured.columns:
+        ensured["review_notes"] = ""
+    if "export" not in ensured.columns:
+        ensured["export"] = True
+    if "manual_time_sec" not in ensured.columns:
+        ensured["manual_time_sec"] = ensured["time_sec"] if "time_sec" in ensured.columns else pd.Series(dtype="float64")
+    if "manual_time_label" not in ensured.columns:
+        if "time_label" in ensured.columns:
+            ensured["manual_time_label"] = ensured["time_label"].astype(str)
+        else:
+            ensured["manual_time_label"] = ""
+    if "operation_result" not in ensured.columns:
+        ensured["operation_result"] = ""
+    if "operation_log" not in ensured.columns:
+        ensured["operation_log"] = ""
+    return ensured
+
+
 def _init_event_annotations(result: dict[str, object], analysis_key: str) -> str:
     state_key = f"event_annotations_{analysis_key}"
     if state_key not in st.session_state:
@@ -92,10 +141,9 @@ def _init_event_annotations(result: dict[str, object], analysis_key: str) -> str
         if base.empty:
             st.session_state[state_key] = base
         else:
-            base["manual_labels"] = base["auto_labels"]
-            base["review_notes"] = ""
-            base["export"] = True
-            st.session_state[state_key] = base
+            st.session_state[state_key] = _ensure_event_annotation_columns(base)
+    else:
+        st.session_state[state_key] = _ensure_event_annotation_columns(st.session_state[state_key])
     return state_key
 
 
@@ -117,7 +165,8 @@ def _event_label(options: list[int], annotations: pd.DataFrame, event_id: int) -
     row = annotations.loc[annotations["event_id"] == event_id].iloc[0]
     priority_label = str(row.get("interaction_priority_label", "")).strip()
     prefix = f"[{priority_label}] " if priority_label else ""
-    return f"{prefix}事件 {event_id} | {row['time_label']} | {row['manual_labels'] or row['auto_labels']}"
+    display_time = str(row.get("manual_time_label", "")).strip() or str(row["time_label"])
+    return f"{prefix}事件 {event_id} | {display_time} | {row['manual_labels'] or row['auto_labels']}"
 
 
 def _section_label(annotations: pd.DataFrame, section_id: int) -> str:
@@ -163,6 +212,49 @@ def _filter_event_annotations(
     return annotations.loc[mask].copy()
 
 
+def _format_operation_log(
+    mode_label: str,
+    row: pd.Series,
+    operation_result: str,
+    manual_time_sec: float,
+    review_notes: str,
+) -> str:
+    original_time_label = str(row.get("time_label", "--"))
+    adjusted_time_label = format_seconds(float(manual_time_sec))
+    pre_rms = max(float(row.get("pre_rms", 0.0)), 1e-8)
+    post_rms = float(row.get("post_rms", 0.0))
+    pre_centroid = max(float(row.get("pre_centroid_hz", 1.0)), 1.0)
+    post_centroid = float(row.get("post_centroid_hz", 0.0))
+    pre_flatness = float(row.get("pre_flatness", 0.0))
+    post_flatness = float(row.get("post_flatness", 0.0))
+    pre_high_ratio = float(row.get("pre_high_ratio", 0.0))
+    post_high_ratio = float(row.get("post_high_ratio", 0.0))
+    rms_ratio = post_rms / pre_rms
+    centroid_ratio = post_centroid / pre_centroid
+    flatness_delta = post_flatness - pre_flatness
+    high_delta = post_high_ratio - pre_high_ratio
+    lines = [
+        f"事件 {int(row.get('event_id', 0))}",
+        f"当前模式：{mode_label}",
+        f"原始时间：{original_time_label}",
+        f"人工时间：{adjusted_time_label}",
+        f"当前自动标签：{str(row.get('auto_labels', ''))}",
+        f"当前人工标签：{str(row.get('manual_labels', ''))}",
+        (
+            "当前事件特征："
+            f"rms_ratio={rms_ratio:.3f}, "
+            f"centroid_ratio={centroid_ratio:.3f}, "
+            f"flatness_delta={flatness_delta:.3f}, "
+            f"high_delta={high_delta:.3f}"
+        ),
+        f"你的操作结果：{operation_result or '未记录'}",
+    ]
+    note_text = review_notes.strip()
+    if note_text:
+        lines.append(f"说明：{note_text}")
+    return "\n".join(lines)
+
+
 def _prepare_event_editor(
     annotations: pd.DataFrame,
     result: dict[str, object],
@@ -183,6 +275,7 @@ def _prepare_event_editor(
     interaction_annotations = annotations.copy()
     interaction_annotations["effective_labels"] = interaction_annotations.apply(_effective_event_labels, axis=1)
     interaction_annotations = annotate_event_interaction_levels(interaction_annotations)
+    interaction_annotations = annotate_event_similarity_groups(interaction_annotations, threshold=0.90)
     filtered_annotations = _filter_event_annotations(interaction_annotations, selected_filter_labels)
     if selected_filter_labels:
         st.caption(f"当前筛选后显示 {len(filtered_annotations)} / {len(annotations)} 个事件。")
@@ -240,6 +333,9 @@ def _prepare_event_editor(
         "这些自动事件点不是只看某一个音高或某一根频率线，而是综合看相邻频谱帧之间的结构变化。"
         "当前算法主要依据：频谱形态差异（cosine distance）、谱流量（spectral flux）、起音强度（onset strength）和能量突变（RMS delta）。"
     )
+    st.caption("事件点颜色现在表示“相似事件组”：如果两个事件的后态声音特征相似度达到约 90% 及以上，它们会用同一种颜色。")
+    if str(result["config"].get("event_model_preset", "")) == "timbre_soundscape":
+        st.caption("在“音色 / 声景模式”下，频谱形态差异这一项还会补充参考 spectral centroid、band energy ratio、高频占比和 flatness。")
     active_event_id = st.selectbox(
         "当前事件",
         options=event_ids,
@@ -249,17 +345,25 @@ def _prepare_event_editor(
 
     active_row = visible_annotations.loc[visible_annotations["event_id"] == active_event_id].iloc[0]
     row_index = annotations.index[annotations["event_id"] == active_event_id][0]
+    active_mode_label = EVENT_MODEL_PRESETS[preset_key]["label"]
 
     detail_col, right_col = st.columns([1.08, 0.92], gap="large")
     with detail_col:
         st.markdown("**事件详情**")
-        st.metric("精确时间", active_row["time_label"])
+        current_time_label = str(active_row.get("manual_time_label", "")).strip() or str(active_row["time_label"])
+        st.metric("当前时间", current_time_label)
+        if current_time_label != str(active_row["time_label"]):
+            st.caption(f"原始检测时间：{active_row['time_label']}")
         st.caption(
-            f"交互层级 {active_row['interaction_priority_label']} | 强度 {active_row['strength']:.3f} | 显著度 {active_row['prominence']:.3f} | 声道 {active_row['channel_bias']}"
+            f"交互层级 {active_row['interaction_priority_label']} | {active_row['similarity_group_label']} | 强度 {active_row['strength']:.3f} | 显著度 {active_row['prominence']:.3f} | 声道 {active_row['channel_bias']}"
         )
         st.write(f"自动候选标签：`{active_row['auto_labels']}`")
         st.write(f"规则摘要：{active_row['descriptor']}")
         st.write(f"主导频率：{active_row['dominant_freqs']}")
+        st.write(
+            f"相似组信息：{active_row['similarity_group_label']}，组内共 {int(active_row['similarity_group_size'])} 个事件，"
+            f"当前点与组内其他事件的最高相似度约为 {float(active_row['max_similarity_in_group']):.0%}"
+        )
 
         default_manual = split_label_text(str(active_row["manual_labels"])) or split_label_text(str(active_row["auto_labels"]))
         default_custom = [
@@ -271,6 +375,8 @@ def _prepare_event_editor(
         manual_custom_key = f"manual_custom_{analysis_key}_{active_event_id}"
         review_note_key = f"review_note_{analysis_key}_{active_event_id}"
         export_key = f"export_event_{analysis_key}_{active_event_id}"
+        manual_time_key = f"manual_time_{analysis_key}_{active_event_id}"
+        operation_result_key = f"operation_result_{analysis_key}_{active_event_id}"
         active_editor_key = f"active_event_editor_{analysis_key}"
 
         if st.session_state.get(active_editor_key) != active_event_id:
@@ -278,6 +384,8 @@ def _prepare_event_editor(
             st.session_state[manual_custom_key] = "、".join(default_custom)
             st.session_state[review_note_key] = str(active_row["review_notes"])
             st.session_state[export_key] = bool(active_row["export"])
+            st.session_state[manual_time_key] = float(active_row.get("manual_time_sec", active_row["time_sec"]))
+            st.session_state[operation_result_key] = str(active_row.get("operation_result", "")).strip() or "暂不处理"
             st.session_state[active_editor_key] = active_event_id
 
         chosen_vocab = st.multiselect(
@@ -298,11 +406,53 @@ def _prepare_event_editor(
             "导出该事件",
             key=export_key,
         )
+        st.markdown("**人工微调事件时间**")
+        manual_time_columns = st.columns(3, gap="small")
+        if manual_time_columns[0].button("前移 0.2 秒", key=f"shift_left_small_{analysis_key}_{active_event_id}", use_container_width=True):
+            st.session_state[manual_time_key] = max(0.0, float(st.session_state.get(manual_time_key, active_row["time_sec"])) - 0.2)
+        if manual_time_columns[1].button("回到原始时间", key=f"reset_time_{analysis_key}_{active_event_id}", use_container_width=True):
+            st.session_state[manual_time_key] = float(active_row["time_sec"])
+        if manual_time_columns[2].button("后移 0.2 秒", key=f"shift_right_small_{analysis_key}_{active_event_id}", use_container_width=True):
+            st.session_state[manual_time_key] = min(float(result["duration_sec"]), float(st.session_state.get(manual_time_key, active_row["time_sec"])) + 0.2)
+
+        manual_time_sec = st.number_input(
+            "人工时间（秒）",
+            min_value=0.0,
+            max_value=float(result["duration_sec"]),
+            step=0.05,
+            key=manual_time_key,
+            format="%.2f",
+        )
+        operation_result = st.selectbox(
+            "你的操作结果",
+            options=OPERATION_RESULT_OPTIONS,
+            key=operation_result_key,
+        )
 
         merged_labels = chosen_vocab + split_label_text(custom_labels_text)
+        row_for_log = active_row.copy()
+        row_for_log["manual_labels"] = join_labels(merged_labels)
         annotations.at[row_index, "manual_labels"] = join_labels(merged_labels)
         annotations.at[row_index, "review_notes"] = review_notes
         annotations.at[row_index, "export"] = export_flag
+        annotations.at[row_index, "manual_time_sec"] = float(manual_time_sec)
+        annotations.at[row_index, "manual_time_label"] = format_seconds(float(manual_time_sec))
+        annotations.at[row_index, "operation_result"] = str(operation_result)
+        annotations.at[row_index, "operation_log"] = _format_operation_log(
+            mode_label=active_mode_label,
+            row=row_for_log,
+            operation_result=str(operation_result),
+            manual_time_sec=float(manual_time_sec),
+            review_notes=str(review_notes),
+        )
+
+        st.markdown("**当前操作日志（可复制）**")
+        st.text_area(
+            "记录区",
+            value=str(annotations.at[row_index, "operation_log"]),
+            height=200,
+            key=f"operation_log_view_{analysis_key}_{active_event_id}",
+        )
 
     with right_col:
         st.markdown("**局部试听**")
@@ -314,7 +464,7 @@ def _prepare_event_editor(
             step=0.5,
             key=f"preview_radius_{analysis_key}",
         )
-        event_time = float(active_row["time_sec"])
+        event_time = float(annotations.at[row_index, "manual_time_sec"])
         clip_start = max(0.0, event_time - preview_radius)
         clip_end = min(float(result["duration_sec"]), event_time + preview_radius)
         st.caption(f"试听区间：{format_seconds(clip_start)} - {format_seconds(clip_end)}")
@@ -377,6 +527,7 @@ def _prepare_event_editor(
             "event_id",
             "time_label",
             "interaction_priority_label",
+            "similarity_group_label",
             "is_major_boundary",
             "auto_labels",
             "manual_labels",
@@ -394,7 +545,8 @@ def _prepare_event_editor(
             "event_id": st.column_config.NumberColumn("事件", disabled=True),
             "time_label": st.column_config.TextColumn("时间", disabled=True),
             "interaction_priority_label": st.column_config.TextColumn("交互层级", disabled=True),
-            "is_major_boundary": st.column_config.CheckboxColumn("强边界", disabled=True),
+            "similarity_group_label": st.column_config.TextColumn("相似组", disabled=True),
+            "is_major_boundary": st.column_config.CheckboxColumn("候选边界", disabled=True),
             "auto_labels": st.column_config.TextColumn("自动标签", disabled=True, width="medium"),
             "manual_labels": st.column_config.TextColumn("人工标签", width="medium"),
             "review_notes": st.column_config.TextColumn("备注", width="large"),
@@ -409,6 +561,31 @@ def _prepare_event_editor(
         annotations.at[target_index, "export"] = bool(edited_row.export)
         annotations.at[target_index, "manual_labels"] = str(edited_row.manual_labels)
         annotations.at[target_index, "review_notes"] = str(edited_row.review_notes)
+
+    log_rows = annotations.loc[
+        annotations.apply(
+            lambda row: (
+                str(row.get("operation_result", "")).strip() not in {"", "暂不处理"}
+                or bool(str(row.get("review_notes", "")).strip())
+                or abs(float(row.get("manual_time_sec", row.get("time_sec", 0.0))) - float(row.get("time_sec", 0.0))) > 1e-6
+            ),
+            axis=1,
+        )
+    ].sort_values("time_sec")
+    if not log_rows.empty:
+        combined_log = "\n\n---\n\n".join(
+            str(text).strip()
+            for text in log_rows["operation_log"].tolist()
+            if str(text).strip()
+        )
+        if combined_log:
+            st.markdown("**全部操作记录（可复制）**")
+            st.text_area(
+                "汇总记录区",
+                value=combined_log,
+                height=260,
+                key=f"combined_operation_log_{analysis_key}",
+            )
 
     effective_label_text = _effective_event_labels(active_row)
     assistant_payload = build_event_assistant_payload(
@@ -492,6 +669,8 @@ with st.sidebar:
         f"onset strength {_format_weight_percent(onset_weight)}% / "
         f"RMS delta {_format_weight_percent(rms_weight)}%"
     )
+    if preset_key == "timbre_soundscape":
+        st.caption("当前模式会额外参考：spectral centroid / band energy ratio / 高频占比 / flatness。")
     channel_mode = st.selectbox(
         "分析通道",
         options=["mix", "left", "right"],
@@ -528,8 +707,8 @@ st.markdown(
     """
 这个版本已经贴近本地 MVP 的完整工作流：
 
-- 自动提取 `RMS / centroid / rolloff / flatness / flux / onset strength / novelty`
-- 自动检测变化点、强边界和新事件位置
+- 自动提取 `RMS / centroid / band energy ratio / high-frequency ratio / rolloff / flatness / flux / onset strength / novelty`
+- 自动检测变化点、候选边界和新事件位置
 - 点击自动标记点可显示精确时间
 - 支持局部试听与人工改标签
 - 支持导出编辑后的 `CSV / JSON`
@@ -584,7 +763,7 @@ metric_1.metric("时长", f"{result['duration_sec']:.2f} 秒")
 metric_2.metric("采样率", f"{result['sr']} Hz")
 metric_3.metric("检测事件数", int(len(result["event_table"])))
 metric_4.metric(
-    "强边界数",
+    "候选边界数",
     int(result["event_table"]["is_major_boundary"].sum()) if not result["event_table"].empty else 0,
 )
 
@@ -664,6 +843,8 @@ with tab_2:
         for feature_name in [
             "rms",
             "spectral_centroid_hz",
+            "band_energy_ratio",
+            "high_band_ratio",
             "rolloff_hz",
             "flatness",
             "spectral_flux",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import colorsys
 import io
 import json
 import os
@@ -1050,6 +1051,19 @@ def save_figure(figure: plt.Figure, output_path: Path) -> None:
     plt.close(figure)
 
 
+def _event_group_palette(count: int) -> list[str]:
+    if count <= 0:
+        return []
+    if count == 1:
+        return ["#4c78a8"]
+    colors: list[str] = []
+    for index in range(count):
+        hue = float(index) / max(count, 1)
+        red, green, blue = colorsys.hsv_to_rgb(hue, 0.62, 0.90)
+        colors.append(f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}")
+    return colors
+
+
 def build_interactive_novelty_chart(feature_table: pd.DataFrame, event_table: pd.DataFrame) -> alt.Chart:
     selector = alt.selection_point(
         name="event_pick",
@@ -1064,7 +1078,7 @@ def build_interactive_novelty_chart(feature_table: pd.DataFrame, event_table: pd
 
     event_source["boundary_type"] = np.where(
         event_source["is_major_boundary"],
-        "强边界",
+        "候选边界",
         "普通事件",
     )
     if "interaction_priority_label" not in event_source.columns:
@@ -1079,11 +1093,19 @@ def build_interactive_novelty_chart(feature_table: pd.DataFrame, event_table: pd
             "strong",
             "medium",
         )
+    if "similarity_group_label" not in event_source.columns:
+        event_source["similarity_group_label"] = [f"相似组 {index}" for index in range(1, len(event_source) + 1)]
+    if "similarity_group_size" not in event_source.columns:
+        event_source["similarity_group_size"] = 1
+    if "max_similarity_in_group" not in event_source.columns:
+        event_source["max_similarity_in_group"] = 1.0
 
     size_map = {"strong": 210, "medium": 135, "weak": 78}
     opacity_map = {"strong": 0.98, "medium": 0.82, "weak": 0.42}
     event_source["point_size"] = event_source["interaction_priority"].map(size_map).fillna(135)
     event_source["point_opacity"] = event_source["interaction_priority"].map(opacity_map).fillna(0.82)
+    similarity_domain = list(dict.fromkeys(event_source["similarity_group_label"].astype(str).tolist()))
+    similarity_range = _event_group_palette(len(similarity_domain))
 
     chart = (
         alt.Chart(event_source)
@@ -1097,11 +1119,11 @@ def build_interactive_novelty_chart(feature_table: pd.DataFrame, event_table: pd
                 selector,
                 alt.value("#d62828"),
                 alt.Color(
-                    "interaction_priority_label:N",
-                    title="交互层级",
+                    "similarity_group_label:N",
+                    title="相似事件组",
                     scale=alt.Scale(
-                        domain=["重点变化", "一般变化", "较小变化"],
-                        range=["#d97706", "#f4a261", "#b8c4d6"],
+                        domain=similarity_domain,
+                        range=similarity_range,
                     ),
                 ),
             ),
@@ -1110,6 +1132,9 @@ def build_interactive_novelty_chart(feature_table: pd.DataFrame, event_table: pd
                 alt.Tooltip("time_label:N", title="时间"),
                 alt.Tooltip("strength:Q", title="强度", format=".3f"),
                 alt.Tooltip("prominence:Q", title="显著度", format=".3f"),
+                alt.Tooltip("similarity_group_label:N", title="相似组"),
+                alt.Tooltip("similarity_group_size:Q", title="组内事件数"),
+                alt.Tooltip("max_similarity_in_group:Q", title="组内最高相似度", format=".0%"),
                 alt.Tooltip("interaction_priority_label:N", title="交互层级"),
                 alt.Tooltip("boundary_type:N", title="类型"),
                 alt.Tooltip("auto_labels:N", title="候选标签"),

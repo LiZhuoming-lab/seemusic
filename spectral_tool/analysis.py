@@ -16,6 +16,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks, resample_poly, spectrogram
 
 ChannelMode = Literal["mix", "left", "right"]
+CANDIDATE_BOUNDARY_LABEL = "候选段落边界"
 
 EVENT_LABEL_VOCAB = [
     "高频扩展",
@@ -24,7 +25,7 @@ EVENT_LABEL_VOCAB = [
     "材料聚集",
     "消散",
     "新事件出现",
-    "段落转换",
+    CANDIDATE_BOUNDARY_LABEL,
     "音色突变",
     "能量增强",
     "能量减弱",
@@ -43,6 +44,8 @@ SECTION_LABEL_VOCAB = [
 FEATURE_COLUMN_LABELS = {
     "rms": "RMS",
     "spectral_centroid_hz": "Spectral Centroid",
+    "band_energy_ratio": "Band Energy Ratio",
+    "high_band_ratio": "High Frequency Ratio",
     "rolloff_hz": "Spectral Rolloff",
     "flatness": "Spectral Flatness",
     "spectral_flux": "Spectral Flux",
@@ -386,10 +389,26 @@ def _framewise_centroid_and_bandwidth(freqs: np.ndarray, magnitude: np.ndarray) 
     return centroid, bandwidth
 
 
+def _framewise_band_energy_ratios(freqs: np.ndarray, magnitude: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    safe_magnitude = np.maximum(magnitude, 1e-10)
+    total_energy = np.maximum(np.sum(safe_magnitude, axis=0), 1e-10)
+    low_mask = freqs < 250.0
+    mid_mask = (freqs >= 250.0) & (freqs < 2000.0)
+    high_mask = freqs >= 2000.0
+
+    low_ratio = (np.sum(safe_magnitude[low_mask, :], axis=0) / total_energy).astype(np.float32)
+    mid_ratio = (np.sum(safe_magnitude[mid_mask, :], axis=0) / total_energy).astype(np.float32)
+    high_ratio = (np.sum(safe_magnitude[high_mask, :], axis=0) / total_energy).astype(np.float32)
+    band_energy_ratio = (high_ratio / np.maximum(low_ratio + mid_ratio, 1e-8)).astype(np.float32)
+    return low_ratio, mid_ratio, high_ratio, band_energy_ratio
+
+
 def _build_feature_table(
     times: np.ndarray,
     rms: np.ndarray,
     centroid: np.ndarray,
+    band_energy_ratio: np.ndarray,
+    high_band_ratio: np.ndarray,
     bandwidth: np.ndarray,
     rolloff: np.ndarray,
     flatness: np.ndarray,
@@ -404,6 +423,8 @@ def _build_feature_table(
             "time_label": [format_seconds(value) for value in times],
             "rms": rms.astype(np.float64),
             "spectral_centroid_hz": centroid.astype(np.float64),
+            "band_energy_ratio": band_energy_ratio.astype(np.float64),
+            "high_band_ratio": high_band_ratio.astype(np.float64),
             "bandwidth_hz": bandwidth.astype(np.float64),
             "rolloff_hz": rolloff.astype(np.float64),
             "flatness": flatness.astype(np.float64),
@@ -437,15 +458,29 @@ def _build_novelty_curve(samples: np.ndarray, sr: int, config: AnalysisConfig) -
         ).astype(np.float32)
         onset_strength = gaussian_filter1d(onset_strength, sigma=1.0)
 
-    cosine_distance = _framewise_cosine_distance(log_bands)
+    centroid, bandwidth = _framewise_centroid_and_bandwidth(freqs, magnitude)
+    rolloff = _framewise_rolloff(freqs, magnitude)
+    flatness = _framewise_flatness(magnitude)
+    _, _, high_band_ratio, band_energy_ratio = _framewise_band_energy_ratios(freqs, magnitude)
+
+    if config.event_model_preset == "timbre_soundscape":
+        timbre_descriptor = np.vstack(
+            [
+                log_bands,
+                _zscore(np.log1p(np.maximum(centroid, 0.0)))[None, :],
+                _zscore(band_energy_ratio)[None, :],
+                _zscore(high_band_ratio)[None, :],
+                _zscore(flatness)[None, :],
+            ]
+        ).astype(np.float32)
+        cosine_distance = _framewise_cosine_distance(timbre_descriptor)
+    else:
+        cosine_distance = _framewise_cosine_distance(log_bands)
+
     rms = np.sqrt(np.mean(np.square(magnitude), axis=0, dtype=np.float64)).astype(np.float32)
     rms_delta = np.zeros_like(rms)
     if rms.size > 1:
         rms_delta[1:] = np.abs(np.diff(rms))
-
-    centroid, bandwidth = _framewise_centroid_and_bandwidth(freqs, magnitude)
-    rolloff = _framewise_rolloff(freqs, magnitude)
-    flatness = _framewise_flatness(magnitude)
 
     cosine_weight, flux_weight, onset_weight, rms_weight = _resolve_novelty_weights(config)
     novelty = (
@@ -474,6 +509,8 @@ def _build_novelty_curve(samples: np.ndarray, sr: int, config: AnalysisConfig) -
         "novelty": novelty.astype(np.float32),
         "rms": rms.astype(np.float32),
         "spectral_centroid_hz": centroid.astype(np.float32),
+        "band_energy_ratio": band_energy_ratio.astype(np.float32),
+        "high_band_ratio": high_band_ratio.astype(np.float32),
         "bandwidth_hz": bandwidth.astype(np.float32),
         "rolloff_hz": rolloff.astype(np.float32),
         "flatness": flatness.astype(np.float32),
@@ -632,9 +669,52 @@ def _event_candidate_labels(
         labels.append("消散")
 
     if is_major_boundary:
-        labels.append("段落转换")
+        labels.append(CANDIDATE_BOUNDARY_LABEL)
 
     return _unique_labels(labels)
+
+
+def _boundary_state_change_score(
+    before: dict[str, float | str],
+    after: dict[str, float | str],
+) -> tuple[float, bool]:
+    before_rms = max(float(before["rms"]), 1e-8)
+    after_rms = float(after["rms"])
+    before_centroid = max(float(before["centroid_hz"]), 1.0)
+    after_centroid = float(after["centroid_hz"])
+    before_bandwidth = max(float(before["bandwidth_hz"]), 1.0)
+    after_bandwidth = float(after["bandwidth_hz"])
+    before_rolloff = max(float(before["rolloff_hz"]), 1.0)
+    after_rolloff = float(after["rolloff_hz"])
+
+    rms_shift = abs(math.log2(after_rms / before_rms))
+    centroid_shift = abs(after_centroid / before_centroid - 1.0)
+    bandwidth_shift = abs(after_bandwidth / before_bandwidth - 1.0)
+    rolloff_shift = abs(after_rolloff / before_rolloff - 1.0)
+    high_shift = abs(float(after["high_ratio"]) - float(before["high_ratio"]))
+    flatness_shift = abs(float(after["flatness"]) - float(before["flatness"]))
+
+    flag_count = sum(
+        [
+            rms_shift >= 0.30,
+            centroid_shift >= 0.15,
+            bandwidth_shift >= 0.16,
+            rolloff_shift >= 0.12,
+            high_shift >= 0.08,
+            flatness_shift >= 0.05,
+        ]
+    )
+
+    score = (
+        min(rms_shift / 0.30, 1.6) * 0.24
+        + min(centroid_shift / 0.15, 1.6) * 0.20
+        + min(bandwidth_shift / 0.16, 1.6) * 0.16
+        + min(rolloff_shift / 0.12, 1.6) * 0.14
+        + min(high_shift / 0.08, 1.6) * 0.14
+        + min(flatness_shift / 0.05, 1.6) * 0.12
+    )
+    is_clear_change = flag_count >= 2 or score >= 1.05
+    return float(score), bool(is_clear_change)
 
 
 def _section_candidate_labels(
@@ -709,6 +789,7 @@ def _build_event_table(
         before_features = _segment_features(before_slice, sr, config)
         after_features = _segment_features(after_slice, sr, config)
         bias = _channel_bias(audio, sr, float(peak_time), context)
+        boundary_state_change_score, boundary_state_change_flag = _boundary_state_change_score(before_features, after_features)
 
         rows.append(
             {
@@ -719,6 +800,9 @@ def _build_event_table(
                 "prominence": round(float(prominences[index]), 4) if index < len(prominences) else math.nan,
                 "channel_bias": bias,
                 "pre_rms": round(float(before_features["rms"]), 6),
+                "pre_centroid_hz": round(float(before_features["centroid_hz"]), 1),
+                "pre_high_ratio": round(float(before_features["high_ratio"]), 4),
+                "pre_flatness": round(float(before_features["flatness"]), 4),
                 "post_rms": round(float(after_features["rms"]), 6),
                 "post_centroid_hz": round(float(after_features["centroid_hz"]), 1),
                 "post_bandwidth_hz": round(float(after_features["bandwidth_hz"]), 1),
@@ -728,6 +812,8 @@ def _build_event_table(
                 "post_high_ratio": round(float(after_features["high_ratio"]), 4),
                 "post_flatness": round(float(after_features["flatness"]), 4),
                 "dominant_freqs": str(after_features["dominant_freqs"]),
+                "_boundary_state_change_score": round(boundary_state_change_score, 4),
+                "_boundary_state_change_flag": bool(boundary_state_change_flag),
                 "_before_features": before_features,
                 "_after_features": after_features,
             }
@@ -737,14 +823,16 @@ def _build_event_table(
     if event_table.empty:
         return event_table
 
-    major_count = min(max(1, int(round(math.sqrt(len(event_table))))), min(6, len(event_table)))
-    major_indices = (
-        event_table.nlargest(major_count, columns=["prominence", "strength"])
-        .sort_values("time_sec")
-        .index
-    )
     event_table["is_major_boundary"] = False
-    event_table.loc[major_indices, "is_major_boundary"] = True
+    candidate_pool = event_table.loc[event_table["_boundary_state_change_flag"]].copy()
+    if not candidate_pool.empty:
+        major_count = min(max(1, int(round(math.sqrt(len(event_table))))), min(6, len(candidate_pool)))
+        major_indices = (
+            candidate_pool.nlargest(major_count, columns=["prominence", "strength"])
+            .sort_values("time_sec")
+            .index
+        )
+        event_table.loc[major_indices, "is_major_boundary"] = True
 
     auto_label_texts: list[str] = []
     summaries: list[str] = []
@@ -759,7 +847,7 @@ def _build_event_table(
 
     event_table["auto_labels"] = auto_label_texts
     event_table["descriptor"] = summaries
-    return event_table.drop(columns=["_before_features", "_after_features"])
+    return event_table.drop(columns=["_before_features", "_after_features", "_boundary_state_change_score", "_boundary_state_change_flag"])
 
 
 def _build_section_table(
@@ -843,6 +931,8 @@ def analyze_audio(
         times=novelty_bundle["times"],
         rms=novelty_bundle["rms"],
         centroid=novelty_bundle["spectral_centroid_hz"],
+        band_energy_ratio=novelty_bundle["band_energy_ratio"],
+        high_band_ratio=novelty_bundle["high_band_ratio"],
         bandwidth=novelty_bundle["bandwidth_hz"],
         rolloff=novelty_bundle["rolloff_hz"],
         flatness=novelty_bundle["flatness"],
@@ -874,7 +964,7 @@ def analyze_audio(
     summary_lines: list[str] = []
     if not event_table.empty:
         summary_lines.append(
-            f"共检测到 {len(event_table)} 个疑似频谱新事件，其中 {int(event_table['is_major_boundary'].sum())} 个被标记为强边界。"
+            f"共检测到 {len(event_table)} 个疑似频谱新事件，其中 {int(event_table['is_major_boundary'].sum())} 个被标记为候选边界。"
         )
         for row in event_table.loc[event_table["is_major_boundary"]].itertuples():
             summary_lines.append(f"{row.time_label}: {row.descriptor}")
