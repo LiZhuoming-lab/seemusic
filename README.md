@@ -18,6 +18,7 @@
   - `乐谱 / 符号分析`
 - 支持 `WAV`、`FLAC`、`AIFF`、`MP3`、`M4A`
 - 支持 `MusicXML`、`MXL`、`MIDI`
+- 支持 `Kern / Humdrum (.krn / .kern)`
 - 自动提取 `RMS`、`spectral centroid`、`rolloff`、`flatness`、`spectral flux`、`onset strength`、`novelty`
 - 自动检测疑似“新材料进入 / 音色突变 / 结构变化”事件点
 - 支持“传统结构模式 / 音色・声景模式”等预设参数切换
@@ -25,6 +26,8 @@
 - 支持人工标签修订、备注补充、事件筛选与结构化导出
 - 支持音高统计、音程序类统计、和声切片、Roman numeral 候选与主题再现候选
 - 支持在右侧工作台中直接调用 `When-in-Rome` GitHub 语料库中的现成乐谱文件
+- 支持在右侧工作台中直接调用 `Beethoven Piano Sonatas` GitHub 语料库中的 `kern` 乐谱
+- 支持 `完满终止候选 / 半终止候选` 的第一阶段自动检测
 - 同时提供图形界面与命令行入口
 
 ## 最新更新
@@ -44,6 +47,19 @@
 
 - 接入 GitHub 开源语料库 `When-in-Rome`  
   右侧工作台新增 [When-in-Rome](https://github.com/MarkGotham/When-in-Rome) 语料库入口，用户可以直接调用仓库中的现成乐谱文件，而不必先手动下载到本地。当前已支持按类别、作曲家和关键词筛选语料，并直接进入符号分析流程。
+
+- 接入 GitHub 开源语料库 `Beethoven Piano Sonatas`  
+  右侧工作台新增 [Beethoven Piano Sonatas](https://github.com/craigsapp/beethoven-piano-sonatas) 语料库入口，用户可以直接调用贝多芬钢琴奏鸣曲 `kern / .krn` 文件，进入当前的 `music21` 符号分析流程。
+
+- 新增 `PAC / 半终止` 终止候选检测  
+  右侧工作台现已支持第一阶段的终止分析，当前可输出：
+  - `完满终止候选`
+  - `半终止候选`
+
+  这一部分采用了更贴近传统作品分析的规则：优先参考主旋律骨架、局部和声到达、前后小节低音支撑与终止窗口收束，而不是只按单一时间切片作硬判断。
+
+- 修复按小节音高事件统计异常  
+  针对部分 `kern` 语料中由解析导致的小节号错位问题，现已改为基于时间线重新映射音高事件所属小节，从而修复了“单一小节音符数异常飙高”的统计错误。
 
 - 新增乐谱文件导出  
   在右侧工作台中，除了分析结果导出外，还支持直接导出原始 `MXL / XML` 文件，以及统一导出的 `MusicXML` 文件，方便继续在其他乐谱软件或音频软件中查看。
@@ -79,9 +95,14 @@ streamlit run app.py
 ```
 
 启动后，在浏览器里打开终端显示的本地地址，上传音频即可开始分析。
-现在在同一个界面里也可以切换到“乐谱 / 符号分析”工作空间，上传 `MusicXML / MXL / MIDI` 开始做第一阶段的和声、音高与主题分析。
+现在在同一个界面里也可以切换到“乐谱 / 符号分析”工作空间，上传 `MusicXML / MXL / MIDI / KRN` 开始做第一阶段的和声、音高、终止与主题分析。
 
-如果你希望直接调用公开语料，也可以在右侧工作台中切换到 `When-in-Rome 语料库`，不必先手动下载乐谱。
+如果你希望直接调用公开语料，也可以在右侧工作台中切换到：
+
+- `When-in-Rome 语料库`
+- `Beethoven Piano Sonatas`
+
+不必先手动下载乐谱。
 
 ### 2.1 本地访问（localhost）
 
@@ -166,11 +187,13 @@ spectral_tool/
   analysis.py           核心分析与事件检测
   assistant.py          AI 小助手与交互层
   cli.py                命令行入口
+  beethoven_sonatas.py  Beethoven Piano Sonatas 语料库接入
   symbolic_analysis.py  基于 music21 的乐谱 / 符号分析
   visualization.py      绘图与交互可视化
   when_in_rome.py       When-in-Rome 语料库接入
 tests/
   test_analysis.py      核心测试
+  test_beethoven_sonatas.py  Beethoven 语料库接入测试
   test_symbolic_analysis.py  符号分析测试
   test_when_in_rome.py  语料库接入测试
 ```
@@ -202,8 +225,9 @@ python3 -m unittest discover -s tests
 
 - [music21](https://github.com/cuthbertLab/music21)
 - [When-in-Rome](https://github.com/MarkGotham/When-in-Rome)
+- [Beethoven Piano Sonatas](https://github.com/craigsapp/beethoven-piano-sonatas)
 
-它们为本项目的乐谱解析、和声候选、音高关系分析与开放语料调用提供了重要支持。本项目在此基础上进一步组织为面向音乐分析研究场景的本地工作台，而不是简单展示原始库功能。
+它们为本项目的乐谱解析、和声候选、音高关系分析、传统作品终止检测实验与开放语料调用提供了重要支持。本项目在此基础上进一步组织为面向音乐分析研究场景的本地工作台，而不是简单展示原始库功能。
 
 ## License
 
