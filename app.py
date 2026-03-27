@@ -24,6 +24,11 @@ from spectral_tool.analysis import (
     join_labels,
     split_label_text,
 )
+from spectral_tool.beethoven_sonatas import (
+    BEETHOVEN_SONATAS_WEB_URL,
+    download_beethoven_sonata_score,
+    list_beethoven_sonata_scores,
+)
 from spectral_tool.symbolic_analysis import (
     SymbolicAnalysisConfig,
     analyze_symbolic_score,
@@ -147,6 +152,16 @@ def _build_musicxml_export_bytes(score_bytes: bytes, source_name: str) -> tuple[
     return export_symbolic_score_file(score_stream, fmt="musicxml")
 
 
+@st.cache_data(show_spinner=False, ttl=6 * 60 * 60)
+def _load_beethoven_sonata_catalog() -> pd.DataFrame:
+    return list_beethoven_sonata_scores()
+
+
+@st.cache_data(show_spinner=False, ttl=6 * 60 * 60)
+def _load_beethoven_sonata_score_bytes(path: str) -> tuple[bytes, str]:
+    return download_beethoven_sonata_score(path)
+
+
 def _ensure_event_annotation_columns(frame: pd.DataFrame) -> pd.DataFrame:
     ensured = frame.copy()
     if "manual_labels" not in ensured.columns:
@@ -223,6 +238,76 @@ def _ensure_theme_annotation_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return ensured
 
 
+def _ensure_cadence_annotation_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    ensured = frame.copy()
+    if "melody_skeleton_class" not in ensured.columns:
+        if "melody_scale_degree" in ensured.columns:
+            ensured["melody_skeleton_class"] = ensured["melody_scale_degree"].apply(
+                lambda value: "主音骨架（1）"
+                if pd.notna(value) and int(value) == 1
+                else f"非主音骨架（{int(value)}）"
+                if pd.notna(value) and int(value) in {3, 5}
+                else "骨架未定"
+            )
+        else:
+            ensured["melody_skeleton_class"] = "骨架未定"
+    if "manual_label" not in ensured.columns:
+        ensured["manual_label"] = ensured.get("cadence_type", pd.Series(dtype="object")).astype(str)
+    if "review_notes" not in ensured.columns:
+        ensured["review_notes"] = ""
+    if "export" not in ensured.columns:
+        ensured["export"] = True
+    return ensured
+
+
+def _sync_cadence_annotations(existing: pd.DataFrame, latest: pd.DataFrame) -> pd.DataFrame:
+    latest_ensured = _ensure_cadence_annotation_columns(latest)
+    if existing.empty:
+        return latest_ensured
+
+    existing_ensured = _ensure_cadence_annotation_columns(existing)
+    identity_columns = ["cadence_type", "cadence_window", "cadence_key", "measure_number", "beat"]
+
+    for column_name in identity_columns:
+        if column_name not in existing_ensured.columns:
+            existing_ensured[column_name] = None
+        if column_name not in latest_ensured.columns:
+            latest_ensured[column_name] = None
+
+    existing_keyed = existing_ensured.set_index(identity_columns, drop=False)
+    latest_keyed = latest_ensured.set_index(identity_columns, drop=False)
+
+    editable_columns = ["manual_label", "review_notes", "export"]
+    shared_keys = latest_keyed.index.intersection(existing_keyed.index)
+    for column_name in editable_columns:
+        if column_name not in existing_keyed.columns or column_name not in latest_keyed.columns:
+            continue
+        latest_keyed.loc[shared_keys, column_name] = existing_keyed.loc[shared_keys, column_name]
+
+    return latest_keyed.reset_index(drop=True)
+
+
+def _cadence_result_signature(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return "empty"
+    normalized = frame.copy()
+    ordered_columns = [
+        "cadence_type",
+        "cadence_window",
+        "cadence_key",
+        "measure_number",
+        "beat",
+        "candidate_score",
+        "previous_roman_numeral",
+        "current_roman_numeral",
+    ]
+    available_columns = [column_name for column_name in ordered_columns if column_name in normalized.columns]
+    normalized = normalized[available_columns].sort_values(
+        [column_name for column_name in ["measure_number", "beat", "cadence_type", "cadence_key"] if column_name in available_columns]
+    ).reset_index(drop=True)
+    return hashlib.sha1(normalized.to_json(orient="records", force_ascii=False).encode("utf-8")).hexdigest()
+
+
 def _init_harmony_annotations(result: dict[str, object], analysis_key: str) -> str:
     state_key = f"harmony_annotations_{analysis_key}"
     if state_key not in st.session_state:
@@ -240,6 +325,24 @@ def _init_theme_annotations(result: dict[str, object], analysis_key: str) -> str
         st.session_state[state_key] = _ensure_theme_annotation_columns(base)
     else:
         st.session_state[state_key] = _ensure_theme_annotation_columns(st.session_state[state_key])
+    return state_key
+
+
+def _init_cadence_annotations(result: dict[str, object], analysis_key: str) -> str:
+    state_key = f"cadence_annotations_{analysis_key}"
+    signature_key = f"{state_key}_result_signature"
+    editor_key = f"cadence_editor_{analysis_key}"
+    base = result["cadence_candidates"].copy()
+    latest_signature = _cadence_result_signature(base)
+    if state_key not in st.session_state:
+        st.session_state[state_key] = _ensure_cadence_annotation_columns(base)
+        st.session_state[signature_key] = latest_signature
+    else:
+        st.session_state[state_key] = _sync_cadence_annotations(st.session_state[state_key], base)
+        if st.session_state.get(signature_key) != latest_signature:
+            st.session_state[signature_key] = latest_signature
+            if editor_key in st.session_state:
+                del st.session_state[editor_key]
     return state_key
 
 
@@ -828,11 +931,12 @@ if workspace == "score":
     st.markdown("### 乐谱 / 符号分析工作台")
     source_mode = st.radio(
         "乐谱来源",
-        options=["local_upload", "when_in_rome"],
+        options=["local_upload", "when_in_rome", "beethoven_sonatas"],
         horizontal=True,
         format_func=lambda value: {
             "local_upload": "本地上传",
             "when_in_rome": "When-in-Rome 语料库",
+            "beethoven_sonatas": "贝多芬钢琴奏鸣曲 32 首",
         }[value],
         key="symbolic_source_mode",
     )
@@ -857,8 +961,8 @@ if workspace == "score":
 
     if source_mode == "local_upload":
         score_file = st.file_uploader(
-            "上传乐谱文件（支持 MusicXML、MXL、MIDI）",
-            type=["musicxml", "xml", "mxl", "mid", "midi"],
+            "上传乐谱文件（支持 MusicXML、MXL、MIDI、KRN）",
+            type=["musicxml", "xml", "mxl", "mid", "midi", "krn", "kern"],
             key="score_file_uploader",
         )
         if score_file is None:
@@ -868,11 +972,15 @@ if workspace == "score":
         score_source = score_file
         score_source_label = str(getattr(score_file, "name", "uploaded_score"))
         score_source_caption = "当前来源：本地上传"
-    else:
+    elif source_mode == "when_in_rome":
         st.markdown(f"**When-in-Rome 语料库**：[打开仓库]({WHEN_IN_ROME_WEB_URL})")
         st.caption("这里接入的是右侧符号分析工作台的外部语料库入口。你可以不上传本地乐谱，直接调用仓库里现成的 MusicXML / MXL / MIDI 文件。")
 
-        catalog = _load_when_in_rome_catalog()
+        try:
+            catalog = _load_when_in_rome_catalog()
+        except RuntimeError as exc:
+            st.warning(str(exc))
+            st.stop()
         if catalog.empty:
             st.warning("暂时没有从 When-in-Rome 语料库读取到可用乐谱。")
             st.stop()
@@ -910,12 +1018,57 @@ if workspace == "score":
         selected_row = filtered_catalog.loc[filtered_catalog["path"] == selected_path].iloc[0]
         st.caption(f"当前文件：{selected_row['path']}")
 
-        score_bytes, score_name = _load_when_in_rome_score_bytes(str(selected_path))
+        try:
+            score_bytes, score_name = _load_when_in_rome_score_bytes(str(selected_path))
+        except RuntimeError as exc:
+            st.warning(str(exc))
+            st.stop()
         score_stream = io.BytesIO(score_bytes)
         score_stream.name = str(score_name)
         score_source = score_stream
         score_source_label = str(selected_row["display_name"])
         score_source_caption = f"当前来源：When-in-Rome / {selected_row['path']}"
+    else:
+        st.markdown(f"**贝多芬钢琴奏鸣曲 32 首语料库**：[打开仓库]({BEETHOVEN_SONATAS_WEB_URL})")
+        st.caption("这里接入的是 craigsapp 提供的 Beethoven piano sonatas GitHub 语料库，当前以 Humdrum / kern 文件为主。")
+
+        try:
+            catalog = _load_beethoven_sonata_catalog()
+        except RuntimeError as exc:
+            st.warning(str(exc))
+            st.stop()
+        if catalog.empty:
+            st.warning("暂时没有从贝多芬钢琴奏鸣曲语料库读取到可用乐谱。")
+            st.stop()
+
+        sonata_numbers = sorted(int(value) for value in catalog["sonata_number"].dropna().unique().tolist() if int(value) > 0)
+        selected_sonata = st.selectbox(
+            "选择奏鸣曲",
+            options=sonata_numbers,
+            format_func=lambda value: f"Sonata No.{int(value)}",
+            key="beethoven_sonata_number",
+        )
+        filtered_catalog = catalog.loc[catalog["sonata_number"] == int(selected_sonata)].copy()
+        movement_numbers = sorted(int(value) for value in filtered_catalog["movement_number"].dropna().unique().tolist() if int(value) > 0)
+        selected_movement = st.selectbox(
+            "选择乐章",
+            options=movement_numbers,
+            format_func=lambda value: f"Movement {int(value)}",
+            key="beethoven_sonata_movement",
+        )
+        selected_row = filtered_catalog.loc[filtered_catalog["movement_number"] == int(selected_movement)].iloc[0]
+        st.caption(f"当前文件：{selected_row['path']}")
+
+        try:
+            score_bytes, score_name = _load_beethoven_sonata_score_bytes(str(selected_row["path"]))
+        except RuntimeError as exc:
+            st.warning(str(exc))
+            st.stop()
+        score_stream = io.BytesIO(score_bytes)
+        score_stream.name = str(score_name)
+        score_source = score_stream
+        score_source_label = str(selected_row["display_name"])
+        score_source_caption = f"当前来源：Beethoven Piano Sonatas / {selected_row['path']}"
 
     if score_bytes is None or score_source is None:
         st.stop()
@@ -926,22 +1079,25 @@ if workspace == "score":
         symbolic_result = analyze_symbolic_score(score_source, config=symbolic_config)
 
     harmony_state_key = _init_harmony_annotations(symbolic_result, symbolic_analysis_key)
+    cadence_state_key = _init_cadence_annotations(symbolic_result, symbolic_analysis_key)
     theme_state_key = _init_theme_annotations(symbolic_result, symbolic_analysis_key)
     harmony_annotations = st.session_state[harmony_state_key].copy()
+    cadence_annotations = st.session_state[cadence_state_key].copy()
     theme_annotations = st.session_state[theme_state_key].copy()
 
-    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
     metric_1.metric("乐谱标题", str(symbolic_result["score_title"]))
     metric_2.metric("总音高事件", int(symbolic_result["total_notes"]))
     metric_3.metric("不同音级类", int(symbolic_result["unique_pitch_classes"]))
-    metric_4.metric("主题再现候选", int(len(symbolic_result["theme_matches"])))
+    metric_4.metric("终止候选", int(len(symbolic_result["cadence_candidates"])))
+    metric_5.metric("主题再现候选", int(len(symbolic_result["theme_matches"])))
     st.caption(f"当前分析对象：{score_source_label}")
 
     st.subheader("机器摘要")
     st.text("\n".join(symbolic_result["summary_lines"]))
 
-    score_tab_1, score_tab_2, score_tab_3, score_tab_4, score_tab_5, score_tab_6 = st.tabs(
-        ["总览", "和声", "音高", "音程 / 关系", "主题 / 动机", "导出"]
+    score_tab_1, score_tab_2, score_tab_3, score_tab_4, score_tab_5, score_tab_6, score_tab_7 = st.tabs(
+        ["总览", "和声", "终止", "音高", "音程 / 关系", "主题 / 动机", "导出"]
     )
 
     with score_tab_1:
@@ -1010,6 +1166,107 @@ if workspace == "score":
                     st.bar_chart(harmony_counts)
 
     with score_tab_3:
+        if cadence_annotations.empty:
+            st.warning("当前规则下没有检测到终止候选。")
+        else:
+            st.caption(
+                "当前终止检测分成两类：完满终止候选与半终止候选。"
+                "完满终止更看重属准备、主到达、旋律骨架落在 1 与终止窗口的 5-1 支撑；"
+                "半终止更看重属到达、属音骨架与句末收束。"
+            )
+            pac_candidates = cadence_annotations.loc[
+                cadence_annotations["cadence_type"].astype(str) == "完满终止候选"
+            ].copy()
+            hc_candidates = cadence_annotations.loc[
+                cadence_annotations["cadence_type"].astype(str) == "半终止候选"
+            ].copy()
+            tonic_skeleton_candidates = pac_candidates.loc[
+                pac_candidates["melody_skeleton_class"].astype(str) == "主音骨架（1）"
+            ].copy()
+            summary_col_1, summary_col_2, summary_col_3 = st.columns(3)
+            summary_col_1.metric("完满终止", int(len(pac_candidates)))
+            summary_col_2.metric("半终止", int(len(hc_candidates)))
+            summary_col_3.metric("主音骨架 PAC", int(len(tonic_skeleton_candidates)))
+
+            if not tonic_skeleton_candidates.empty:
+                st.markdown("**旋律骨架为 1 的候选**")
+                st.dataframe(
+                    tonic_skeleton_candidates[
+                        [
+                            "measure_number",
+                            "cadence_window",
+                            "cadence_key",
+                            "candidate_score",
+                            "melody_pitch_name",
+                            "melody_scale_degree",
+                            "melody_skeleton_class",
+                            "previous_roman_numeral",
+                            "current_roman_numeral",
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            cadence_editor = st.data_editor(
+                cadence_annotations[
+                    [
+                        "export",
+                        "cadence_type",
+                        "cadence_window",
+                        "cadence_key",
+                        "candidate_score",
+                        "dominant_score",
+                        "tonic_score",
+                        "melody_score",
+                        "bass_score",
+                        "closure_score",
+                        "measure_number",
+                        "beat",
+                        "melody_skeleton_class",
+                        "previous_roman_numeral",
+                        "current_roman_numeral",
+                        "previous_bass_scale_degree",
+                        "current_bass_scale_degree",
+                        "melody_pitch_name",
+                        "melody_scale_degree",
+                        "manual_label",
+                        "review_notes",
+                    ]
+                ],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "export": st.column_config.CheckboxColumn("导出"),
+                    "cadence_type": st.column_config.TextColumn("系统判断", disabled=True),
+                    "cadence_window": st.column_config.TextColumn("终止窗口", disabled=True),
+                    "cadence_key": st.column_config.TextColumn("判定调性", disabled=True),
+                    "candidate_score": st.column_config.NumberColumn("总分", disabled=True, format="%.3f"),
+                    "dominant_score": st.column_config.NumberColumn("属准备", disabled=True, format="%.3f"),
+                    "tonic_score": st.column_config.NumberColumn("主到达", disabled=True, format="%.3f"),
+                    "melody_score": st.column_config.NumberColumn("旋律骨架", disabled=True, format="%.3f"),
+                    "bass_score": st.column_config.NumberColumn("低音支撑", disabled=True, format="%.3f"),
+                    "closure_score": st.column_config.NumberColumn("句末收束", disabled=True, format="%.3f"),
+                    "measure_number": st.column_config.NumberColumn("小节", disabled=True),
+                    "beat": st.column_config.NumberColumn("拍点", disabled=True),
+                    "melody_skeleton_class": st.column_config.TextColumn("旋律骨架分类", disabled=True),
+                    "previous_roman_numeral": st.column_config.TextColumn("前和声", disabled=True),
+                    "current_roman_numeral": st.column_config.TextColumn("当前和声", disabled=True),
+                    "previous_bass_scale_degree": st.column_config.NumberColumn("前窗口低音级数", disabled=True),
+                    "current_bass_scale_degree": st.column_config.NumberColumn("当前窗口低音级数", disabled=True),
+                    "melody_pitch_name": st.column_config.TextColumn("旋律音", disabled=True),
+                    "melody_scale_degree": st.column_config.NumberColumn("旋律音级", disabled=True),
+                    "manual_label": st.column_config.TextColumn("人工标签", width="medium"),
+                    "review_notes": st.column_config.TextColumn("备注", width="large"),
+                },
+                key=f"cadence_editor_{symbolic_analysis_key}",
+            )
+            cadence_annotations.loc[:, "export"] = cadence_editor["export"].astype(bool).to_numpy()
+            cadence_annotations.loc[:, "manual_label"] = cadence_editor["manual_label"].astype(str).to_numpy()
+            cadence_annotations.loc[:, "review_notes"] = cadence_editor["review_notes"].astype(str).to_numpy()
+            st.session_state[cadence_state_key] = cadence_annotations
+
+    with score_tab_4:
         if not symbolic_result["pitch_class_histogram"].empty:
             st.markdown("**音级类分布**")
             st.bar_chart(
@@ -1025,7 +1282,7 @@ if workspace == "score":
         st.markdown("**音高总表（前 300 行）**")
         st.dataframe(symbolic_result["note_table"].head(300), width="stretch", hide_index=True)
 
-    with score_tab_4:
+    with score_tab_5:
         if symbolic_result["interval_table"].empty:
             st.warning("当前乐谱没有足够的连续旋律音高用于音程分析。")
         else:
@@ -1040,7 +1297,7 @@ if workspace == "score":
                 st.bar_chart(directed_histogram, height=260)
             st.dataframe(symbolic_result["interval_table"].head(300), width="stretch", hide_index=True)
 
-    with score_tab_5:
+    with score_tab_6:
         if theme_annotations.empty:
             st.warning("当前窗口长度下没有检测到明显的主题 / 动机再现候选。")
         else:
@@ -1082,22 +1339,27 @@ if workspace == "score":
             theme_annotations.loc[:, "review_notes"] = theme_editor["review_notes"].astype(str).to_numpy()
             st.session_state[theme_state_key] = theme_annotations
 
-    with score_tab_6:
+    with score_tab_7:
         exported_harmony = harmony_annotations.copy()
+        exported_cadence = cadence_annotations.copy()
         exported_theme = theme_annotations.copy()
         if not exported_harmony.empty:
             exported_harmony = exported_harmony.loc[exported_harmony["export"]].copy()
+        if not exported_cadence.empty:
+            exported_cadence = exported_cadence.loc[exported_cadence["export"]].copy()
         if not exported_theme.empty:
             exported_theme = exported_theme.loc[exported_theme["export"]].copy()
 
         note_csv = symbolic_result["note_table"].to_csv(index=False).encode("utf-8-sig")
         harmony_csv = exported_harmony.to_csv(index=False).encode("utf-8-sig")
+        cadence_csv = exported_cadence.to_csv(index=False).encode("utf-8-sig")
         interval_csv = symbolic_result["interval_table"].to_csv(index=False).encode("utf-8-sig")
         theme_csv = exported_theme.to_csv(index=False).encode("utf-8-sig")
         summary_text = "\n".join(symbolic_result["summary_lines"]).encode("utf-8")
         analysis_json = build_symbolic_export_payload(
             symbolic_result,
             harmony_annotations=exported_harmony,
+            cadence_annotations=exported_cadence,
             theme_annotations=exported_theme,
         )
         source_name = str(getattr(score_source, "name", "") or score_source_label or "score_input.musicxml")
@@ -1108,6 +1370,8 @@ if workspace == "score":
             ".xml": "application/xml",
             ".mid": "audio/midi",
             ".midi": "audio/midi",
+            ".krn": "text/plain",
+            ".kern": "text/plain",
         }.get(source_suffix, "application/octet-stream")
         musicxml_bytes, musicxml_filename, musicxml_mime = _build_musicxml_export_bytes(score_bytes, source_name)
 
@@ -1116,6 +1380,7 @@ if workspace == "score":
         with result_export_col_1:
             st.download_button("下载音高总表 CSV", data=note_csv, file_name="score_note_table.csv", mime="text/csv", use_container_width=True)
             st.download_button("下载和声分析 CSV", data=harmony_csv, file_name="harmony_annotations.csv", mime="text/csv", use_container_width=True)
+            st.download_button("下载终止候选 CSV", data=cadence_csv, file_name="cadence_candidates.csv", mime="text/csv", use_container_width=True)
             st.download_button("下载音程分析 CSV", data=interval_csv, file_name="interval_table.csv", mime="text/csv", use_container_width=True)
         with result_export_col_2:
             st.download_button("下载主题再现 CSV", data=theme_csv, file_name="theme_matches.csv", mime="text/csv", use_container_width=True)
@@ -1126,7 +1391,7 @@ if workspace == "score":
         st.caption("这一组适合把乐谱文件直接带到其他音频软件、乐谱软件或外部分析环境里继续查看。")
         score_export_col_1, score_export_col_2 = st.columns(2, gap="medium")
         with score_export_col_1:
-            if source_suffix in {".mxl", ".musicxml", ".xml"}:
+            if source_suffix in {".mxl", ".musicxml", ".xml", ".krn", ".kern"}:
                 st.download_button(
                     "下载原始乐谱文件",
                     data=score_bytes,

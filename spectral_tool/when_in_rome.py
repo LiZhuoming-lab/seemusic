@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import ssl
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 
 import certifi
 import pandas as pd
@@ -23,7 +25,15 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
-def _fetch_json(url: str) -> Any:
+def _network_error_message(repository_name: str) -> str:
+    return (
+        f"暂时无法连接 {repository_name} 语料库。"
+        "这通常是网络抖动、GitHub 限速或远端暂时无响应造成的。"
+        "请稍后重试，或先切换回本地上传。"
+    )
+
+
+def _fetch_json(url: str, repository_name: str = "When-in-Rome", retries: int = 3) -> Any:
     request = urllib.request.Request(
         url,
         headers={
@@ -31,8 +41,18 @@ def _fetch_json(url: str) -> Any:
             "User-Agent": "seemusic-when-in-rome-loader",
         },
     )
-    with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
-        return json.load(response)
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(request, context=_ssl_context(), timeout=30) as response:
+                return json.load(response)
+        except (HTTPError, URLError, TimeoutError, ConnectionResetError, OSError) as exc:
+            last_error = exc
+            if attempt < retries - 1:
+                time.sleep(0.7 * (attempt + 1))
+                continue
+            raise RuntimeError(_network_error_message(repository_name)) from exc
+    raise RuntimeError(_network_error_message(repository_name)) from last_error
 
 
 def _humanize_segment(value: str) -> str:
@@ -93,6 +113,16 @@ def download_when_in_rome_score(path: str) -> tuple[bytes, str]:
         entry["raw_url"],
         headers={"User-Agent": "seemusic-when-in-rome-loader"},
     )
-    with urllib.request.urlopen(request, context=_ssl_context(), timeout=60) as response:
-        data = response.read()
-    return data, entry["score_name"]
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, context=_ssl_context(), timeout=60) as response:
+                data = response.read()
+            return data, entry["score_name"]
+        except (HTTPError, URLError, TimeoutError, ConnectionResetError, OSError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.7 * (attempt + 1))
+                continue
+            raise RuntimeError(_network_error_message("When-in-Rome")) from exc
+    raise RuntimeError(_network_error_message("When-in-Rome")) from last_error
