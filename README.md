@@ -80,31 +80,96 @@
 - 需要将听觉分析与频谱证据结合起来写论文的学生
 - 想先用机器完成一轮“事件初筛”，再回到人工判断的使用者
 
-## 快速开始
+## 本地部署（推荐给同学）
 
-### 1. 安装依赖
+如果你想把 `seemusic` 部署到自己的个人电脑上，最稳妥的方式是：`下载代码 -> 创建虚拟环境 -> 安装依赖 -> 启动网页`。
+
+### 1. 准备环境
+
+建议先安装：
+
+- `Python 3.11` 或 `Python 3.12`
+- `Git`
+
+可以先在终端里检查：
 
 ```bash
+python3 --version
+git --version
+```
+
+如果你使用的是 Windows，也可以用：
+
+```powershell
+python --version
+git --version
+```
+
+### 2. 从 GitHub 下载项目
+
+推荐直接克隆仓库：
+
+```bash
+git clone https://github.com/LiZhuoming-lab/seemusic.git
+cd seemusic
+```
+
+如果你已经配置过 SSH，也可以使用：
+
+```bash
+git clone git@github.com:LiZhuoming-lab/seemusic.git
+cd seemusic
+```
+
+### 3. 创建虚拟环境
+
+Mac / Linux：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Windows PowerShell：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+### 4. 安装依赖
+
+Mac / Linux：
+
+```bash
+python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 ```
 
-### 2. 启动图形界面
+Windows PowerShell：
 
-```bash
-streamlit run app.py
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-启动后，在浏览器里打开终端显示的本地地址，上传音频即可开始分析。
-现在在同一个界面里也可以切换到“乐谱 / 符号分析”工作空间，上传 `MusicXML / MXL / MIDI / KRN` 开始做第一阶段的和声、音高、终止与主题分析。
+### 5. 启动图形界面
 
-如果你希望直接调用公开语料，也可以在右侧工作台中切换到：
+推荐这样启动：
 
-- `When-in-Rome 语料库`
-- `Beethoven Piano Sonatas`
+```bash
+python3 -m streamlit run app.py
+```
 
-不必先手动下载乐谱。
+如果你的环境里 `python3` 不可用，就改成：
 
-### 2.1 本地访问（localhost）
+```bash
+python -m streamlit run app.py
+```
+
+启动后，在浏览器里打开终端显示的本地地址即可开始分析。
+
+### 6. 本地访问（localhost）
 
 默认情况下，Streamlit 会在本机启动一个本地网页服务，通常可以直接打开：
 
@@ -116,7 +181,28 @@ streamlit run app.py
 
 - `http://你的局域网IP:8501`
 
-### 3. 命令行使用
+### 7. 启动后可以做什么
+
+进入网页后，你会看到两个并列工作台：
+
+- 左侧：`音频 / 频谱分析`
+- 右侧：`乐谱 / 符号分析`
+
+当前支持的输入包括：
+
+- 音频：`WAV / FLAC / AIFF / MP3 / M4A`
+- 乐谱：`MusicXML / MXL / MIDI / KRN / kern`
+
+现在在同一个界面里也可以切换到“乐谱 / 符号分析”工作空间，上传 `MusicXML / MXL / MIDI / KRN` 开始做第一阶段的和声、音高、终止与主题分析。
+
+如果你希望直接调用公开语料，也可以在右侧工作台中切换到：
+
+- `When-in-Rome 语料库`
+- `Beethoven Piano Sonatas`
+
+不必先手动下载乐谱。
+
+### 8. 命令行使用
 
 ```bash
 python3 -m spectral_tool.cli your_audio.wav
@@ -132,6 +218,56 @@ python3 -m spectral_tool.cli your_audio.wav \
   --hop-length 1024 \
   --min-event-distance 5 \
   --threshold-sigma 1.0
+```
+
+### 9. 常见问题
+
+**找不到 `streamlit`**
+
+优先使用：
+
+```bash
+python3 -m streamlit run app.py
+```
+
+**依赖安装报错**
+
+先升级 `pip` 再装：
+
+```bash
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+```
+
+**`localhost:8501` 打不开**
+
+可以换端口试试：
+
+```bash
+python3 -m streamlit run app.py --server.port 8502
+```
+
+然后打开：
+
+- `http://localhost:8502`
+
+**右侧公开语料库一时连不上**
+
+这通常是 GitHub 网络问题、限速或者远端暂时无响应造成的。你可以先改用“本地上传”继续分析，不影响核心功能。
+
+### 10. 建议反馈格式
+
+如果你想把这个项目发给同学试用，建议让他们按下面的格式反馈：
+
+```text
+系统：
+Python 版本：
+是否成功安装依赖：
+是否成功打开网页：
+测试的是音频分析还是乐谱分析：
+报错截图或报错原文：
+最喜欢的功能：
+最困惑的地方：
 ```
 
 ## 输出内容
