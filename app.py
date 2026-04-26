@@ -16,6 +16,51 @@ st.set_page_config(
 
 st.title("音乐分析平台")
 st.caption("保留原有声景 / 频谱事件分析，同时新增第一阶段乐谱符号分析工作台。")
+with st.expander("部署 / 使用 / 反馈说明", expanded=False):
+    st.markdown(
+        """
+如果你想把 `seemusic` 部署到自己的电脑上给同学使用，可以直接按下面这几步做：
+
+1. 从 GitHub 下载项目
+```bash
+git clone https://github.com/LiZhuoming-lab/seemusic.git
+cd seemusic
+```
+
+2. 创建虚拟环境并安装依赖
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+```
+
+3. 启动网页
+```bash
+python3 -m streamlit run app.py
+```
+
+4. 在浏览器打开
+- `http://localhost:8501`
+
+建议测试：
+- 左侧 `音频 / 频谱分析`
+- 右侧 `乐谱 / 符号分析`
+- 本地上传文件
+- 公开语料库入口
+
+建议反馈格式：
+- 系统 / Python 版本
+- 是否成功安装依赖
+- 是否成功打开网页
+- 测试的是音频分析还是乐谱分析
+- 报错截图或报错原文
+- 最喜欢的功能
+- 最困惑的地方
+
+音乐分析交流可联系 `Mendel_Dog`
+"""
+    )
 if "workspace_mode" not in st.session_state:
     st.session_state["workspace_mode"] = "audio"
 
