@@ -66,7 +66,7 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
         )
         if score_file is None:
             st.info("上传一份乐谱后，系统会生成和声、音高、音程和主题再现的第一轮分析结果。")
-            st.stop()
+            return
         score_bytes = score_file.getvalue()
         score_source = score_file
         score_source_label = str(getattr(score_file, "name", "uploaded_score"))
@@ -79,10 +79,10 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
             catalog = load_when_in_rome_catalog()
         except RuntimeError as exc:
             st.warning(str(exc))
-            st.stop()
+            return
         if catalog.empty:
             st.warning("暂时没有从 When-in-Rome 语料库读取到可用乐谱。")
-            st.stop()
+            return
 
         category_options = ["全部"] + sorted(catalog["category_label"].dropna().unique().tolist())
         selected_category = st.selectbox("类别", options=category_options, key="wir_category")
@@ -105,7 +105,7 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
 
         if filtered_catalog.empty:
             st.warning("当前筛选条件下没有匹配到可调用的语料文件。")
-            st.stop()
+            return
 
         st.caption(f"当前筛选到 {len(filtered_catalog)} 份可分析乐谱。")
         selected_path = st.selectbox(
@@ -121,7 +121,7 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
             score_bytes, score_name = load_when_in_rome_score_bytes(str(selected_path))
         except RuntimeError as exc:
             st.warning(str(exc))
-            st.stop()
+            return
         score_stream = io.BytesIO(score_bytes)
         score_stream.name = str(score_name)
         score_source = score_stream
@@ -135,10 +135,10 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
             catalog = load_beethoven_sonata_catalog()
         except RuntimeError as exc:
             st.warning(str(exc))
-            st.stop()
+            return
         if catalog.empty:
             st.warning("暂时没有从贝多芬钢琴奏鸣曲语料库读取到可用乐谱。")
-            st.stop()
+            return
 
         sonata_numbers = sorted(int(value) for value in catalog["sonata_number"].dropna().unique().tolist() if int(value) > 0)
         selected_sonata = st.selectbox(
@@ -162,7 +162,7 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
             score_bytes, score_name = load_beethoven_sonata_score_bytes(str(selected_row["path"]))
         except RuntimeError as exc:
             st.warning(str(exc))
-            st.stop()
+            return
         score_stream = io.BytesIO(score_bytes)
         score_stream.name = str(score_name)
         score_source = score_stream
@@ -170,7 +170,7 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
         score_source_caption = f"当前来源：Beethoven Piano Sonatas / {selected_row['path']}"
 
     if score_bytes is None or score_source is None:
-        st.stop()
+        return
 
     st.caption(score_source_caption)
     symbolic_analysis_key = build_symbolic_analysis_signature(score_bytes, symbolic_config)
@@ -253,6 +253,28 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
                 st.bar_chart(directed_histogram, height=260)
             st.dataframe(symbolic_result["interval_table"].head(300), width="stretch", hide_index=True)
 
+        if not symbolic_result["measure_consonance_summary"].empty:
+            st.markdown("**按小节的音程协和走向**")
+            st.caption("数值越小越协和。这里只统计同一时刻纵向同时发声的音，不把分解和弦算进去。")
+            st.line_chart(
+                symbolic_result["measure_consonance_summary"].set_index("measure_number")[["mean_consonance_rank"]],
+                height=260,
+            )
+            st.dataframe(symbolic_result["measure_consonance_summary"], width="stretch", hide_index=True)
+
+        if not symbolic_result["vertical_interval_histogram"].empty:
+            st.markdown("**纵向音程分布**")
+            vertical_histogram = symbolic_result["vertical_interval_histogram"].copy()
+            vertical_histogram["interval_display"] = vertical_histogram.apply(
+                lambda row: f"{int(row['consonance_rank'])} = {row['interval_name']}",
+                axis=1,
+            )
+            st.bar_chart(vertical_histogram.set_index("interval_display")["count"], height=260)
+
+        if not symbolic_result["vertical_interval_table"].empty:
+            st.markdown("**纵向音程明细（前 300 行）**")
+            st.dataframe(symbolic_result["vertical_interval_table"].head(300), width="stretch", hide_index=True)
+
     with score_tab_6:
         theme_annotations = render_theme_editor(theme_annotations, symbolic_analysis_key)
         st.session_state[theme_state_key] = theme_annotations
@@ -272,6 +294,8 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
         harmony_csv = exported_harmony.to_csv(index=False).encode("utf-8-sig")
         cadence_csv = exported_cadence.to_csv(index=False).encode("utf-8-sig")
         interval_csv = symbolic_result["interval_table"].to_csv(index=False).encode("utf-8-sig")
+        vertical_interval_csv = symbolic_result["vertical_interval_table"].to_csv(index=False).encode("utf-8-sig")
+        measure_consonance_csv = symbolic_result["measure_consonance_summary"].to_csv(index=False).encode("utf-8-sig")
         theme_csv = exported_theme.to_csv(index=False).encode("utf-8-sig")
         summary_text = "\n".join(symbolic_result["summary_lines"]).encode("utf-8")
         analysis_json = build_symbolic_export_payload(
@@ -301,6 +325,8 @@ def render_score_workspace(symbolic_config: SymbolicAnalysisConfig) -> None:
             st.download_button("下载终止候选 CSV", data=cadence_csv, file_name="cadence_candidates.csv", mime="text/csv", use_container_width=True)
             st.download_button("下载音程分析 CSV", data=interval_csv, file_name="interval_table.csv", mime="text/csv", use_container_width=True)
         with result_export_col_2:
+            st.download_button("下载纵向音程 CSV", data=vertical_interval_csv, file_name="vertical_interval_table.csv", mime="text/csv", use_container_width=True)
+            st.download_button("下载协和走向 CSV", data=measure_consonance_csv, file_name="measure_consonance_summary.csv", mime="text/csv", use_container_width=True)
             st.download_button("下载主题再现 CSV", data=theme_csv, file_name="theme_matches.csv", mime="text/csv", use_container_width=True)
             st.download_button("下载摘要 TXT", data=summary_text, file_name="symbolic_summary.txt", mime="text/plain", use_container_width=True)
             st.download_button("下载完整分析 JSON", data=analysis_json, file_name="symbolic_analysis.json", mime="application/json", use_container_width=True)

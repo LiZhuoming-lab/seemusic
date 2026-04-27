@@ -70,6 +70,28 @@ def _build_harmony_score() -> stream.Score:
     return score
 
 
+def _build_vertical_consonance_score() -> stream.Score:
+    score = stream.Score(id="VerticalConsonance")
+    part = stream.Part(id="Harmony")
+    part.partName = "Piano"
+    part.insert(0, key.Key("F"))
+    part.insert(0, meter.TimeSignature("4/4"))
+
+    measure_1 = stream.Measure(number=1)
+    measure_1.append(note.Note("F3", quarterLength=1.0))
+    measure_1.append(note.Note("A-3", quarterLength=1.0))
+    measure_1.append(note.Note("C4", quarterLength=1.0))
+    measure_1.append(note.Rest(quarterLength=1.0))
+
+    measure_2 = stream.Measure(number=2)
+    measure_2.append(chord.Chord(["F3", "A-3", "C4"], quarterLength=4.0))
+
+    part.append(measure_1)
+    part.append(measure_2)
+    score.append(part)
+    return score
+
+
 def _build_empty_chord_score() -> stream.Score:
     score = stream.Score(id="EmptyChordScore")
     part = stream.Part(id="SparseHarmony")
@@ -436,6 +458,21 @@ class SymbolicAnalysisTestCase(unittest.TestCase):
         self.assertIn("I", roman_candidates)
         self.assertIn("V", roman_candidates)
         self.assertIn("IV", roman_candidates)
+
+    def test_vertical_consonance_ignores_broken_chords_and_keeps_simultaneous_triad_intervals(self) -> None:
+        result = analyze_symbolic_score(_build_vertical_consonance_score())
+
+        vertical_table = result["vertical_interval_table"]
+        self.assertFalse(vertical_table.empty)
+        self.assertEqual(set(vertical_table["measure_number"].astype(int)), {2})
+        interval_names = vertical_table.loc[vertical_table["measure_number"].astype(int) == 2, "interval_name"].astype(str).tolist()
+        self.assertCountEqual(interval_names, ["小三度", "大三度", "纯五度"])
+
+        summary = result["measure_consonance_summary"]
+        self.assertEqual(set(summary["measure_number"].astype(int)), {2})
+        measure_2 = summary.iloc[0]
+        self.assertEqual(int(measure_2["vertical_interval_count"]), 3)
+        self.assertAlmostEqual(float(measure_2["mean_consonance_rank"]), (6 + 5 + 3) / 3, places=3)
 
     def test_empty_chord_events_are_skipped_safely(self) -> None:
         result = analyze_symbolic_score(_build_empty_chord_score())

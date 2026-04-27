@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from itertools import combinations
 import json
 import os
 import re
@@ -33,6 +34,22 @@ class SymbolicAnalysisConfig:
 
 
 KEYBOARD_PART_KEYWORDS = ("piano", "klavier", "pf", "keyboard", "harpsichord", "organ", "钢琴")
+
+VERTICAL_INTERVAL_CONSONANCE_RANKS = {
+    "纯一度": 1,
+    "纯八度": 2,
+    "纯五度": 3,
+    "纯四度": 4,
+    "大三度": 5,
+    "小三度": 6,
+    "大六度": 7,
+    "小六度": 8,
+    "大二度": 9,
+    "小七度": 10,
+    "小二度": 11,
+    "大七度": 12,
+    "增四度 / 减五度": 13,
+}
 
 
 def _format_pitch_name_chinese(name: str) -> str:
@@ -84,6 +101,9 @@ def analyze_symbolic_score(
     measure_pitch_summary = _build_measure_pitch_summary(note_table, active_config.measure_summary_top_n)
     interval_table, interval_class_histogram, directed_interval_histogram = _build_interval_tables(melodic_sequences)
     harmony_table = _build_harmony_table(score, global_key)
+    vertical_interval_table = _build_vertical_interval_table(harmony_table)
+    vertical_interval_histogram = _build_vertical_interval_histogram(vertical_interval_table)
+    measure_consonance_summary = _build_measure_consonance_summary(vertical_interval_table)
     theme_sequences = _select_theme_search_sequences(melodic_sequences)
     cadence_candidates = _build_cadence_candidates(
         harmony_table=harmony_table,
@@ -108,6 +128,7 @@ def analyze_symbolic_score(
         unique_pitch_classes=unique_pitch_classes,
         pitch_class_histogram=pitch_class_histogram,
         interval_class_histogram=interval_class_histogram,
+        vertical_interval_histogram=vertical_interval_histogram,
         harmony_table=harmony_table,
         cadence_candidates=cadence_candidates,
         theme_matches=theme_matches,
@@ -129,6 +150,9 @@ def analyze_symbolic_score(
         "interval_table": interval_table,
         "interval_class_histogram": interval_class_histogram,
         "directed_interval_histogram": directed_interval_histogram,
+        "vertical_interval_table": vertical_interval_table,
+        "vertical_interval_histogram": vertical_interval_histogram,
+        "measure_consonance_summary": measure_consonance_summary,
         "harmony_table": harmony_table,
         "cadence_candidates": cadence_candidates,
         "theme_matches": theme_matches,
@@ -693,6 +717,152 @@ def _build_harmony_table(
     if harmony_table.empty:
         return harmony_table
     return harmony_table.sort_values(["measure_number", "beat", "slice_id"]).reset_index(drop=True)
+
+
+def _classify_vertical_interval_consonance(interval_object: m21interval.Interval) -> tuple[str, int]:
+    semitones = abs(int(interval_object.semitones))
+    if semitones == 0:
+        return "纯一度", VERTICAL_INTERVAL_CONSONANCE_RANKS["纯一度"]
+    if semitones % 12 == 0:
+        return "纯八度", VERTICAL_INTERVAL_CONSONANCE_RANKS["纯八度"]
+
+    mapping = {
+        "P5": "纯五度",
+        "P4": "纯四度",
+        "M3": "大三度",
+        "m3": "小三度",
+        "M6": "大六度",
+        "m6": "小六度",
+        "M2": "大二度",
+        "m7": "小七度",
+        "m2": "小二度",
+        "M7": "大七度",
+        "A4": "增四度 / 减五度",
+        "d5": "增四度 / 减五度",
+    }
+    interval_label = mapping.get(interval_object.simpleName)
+    if interval_label is None:
+        fallback_map = {
+            1: "小二度",
+            2: "大二度",
+            3: "小三度",
+            4: "大三度",
+            5: "纯四度",
+            6: "增四度 / 减五度",
+            7: "纯五度",
+            8: "小六度",
+            9: "大六度",
+            10: "小七度",
+            11: "大七度",
+        }
+        interval_label = fallback_map.get(semitones % 12, "增四度 / 减五度")
+    return interval_label, int(VERTICAL_INTERVAL_CONSONANCE_RANKS[interval_label])
+
+
+def _build_vertical_interval_table(harmony_table: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "slice_id",
+        "measure_number",
+        "beat",
+        "quarter_length",
+        "lower_pitch",
+        "upper_pitch",
+        "interval_name",
+        "simple_name",
+        "semitones",
+        "consonance_rank",
+        "consonance_label",
+    ]
+    if harmony_table.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, Any]] = []
+    for _, harmony_row in harmony_table.iterrows():
+        tokens = [token for token in str(harmony_row.get("pitch_names", "")).split() if token]
+        if len(tokens) < 2:
+            continue
+        pitches: list[m21pitch.Pitch] = []
+        for token in tokens:
+            try:
+                pitches.append(m21pitch.Pitch(token))
+            except Exception:
+                continue
+        if len(pitches) < 2:
+            continue
+
+        ordered_pitches = sorted(pitches, key=lambda pitch_object: int(pitch_object.midi))
+        for lower_pitch, upper_pitch in combinations(ordered_pitches, 2):
+            interval_object = m21interval.Interval(lower_pitch, upper_pitch)
+            interval_label, consonance_rank = _classify_vertical_interval_consonance(interval_object)
+            rows.append(
+                {
+                    "slice_id": int(harmony_row["slice_id"]),
+                    "measure_number": int(harmony_row["measure_number"]),
+                    "beat": round(_safe_float(harmony_row["beat"]), 3),
+                    "quarter_length": round(_safe_float(harmony_row["quarter_length"]), 3),
+                    "lower_pitch": lower_pitch.nameWithOctave,
+                    "upper_pitch": upper_pitch.nameWithOctave,
+                    "interval_name": interval_label,
+                    "simple_name": interval_object.simpleName,
+                    "semitones": abs(int(interval_object.semitones)),
+                    "consonance_rank": consonance_rank,
+                    "consonance_label": f"{consonance_rank} = {interval_label}",
+                }
+            )
+
+    vertical_interval_table = pd.DataFrame(rows)
+    if vertical_interval_table.empty:
+        return pd.DataFrame(columns=columns)
+    return vertical_interval_table.sort_values(
+        ["measure_number", "beat", "slice_id", "consonance_rank", "lower_pitch", "upper_pitch"]
+    ).reset_index(drop=True)
+
+
+def _build_vertical_interval_histogram(vertical_interval_table: pd.DataFrame) -> pd.DataFrame:
+    if vertical_interval_table.empty:
+        return pd.DataFrame(columns=["interval_name", "consonance_rank", "count", "ratio"])
+
+    histogram = (
+        vertical_interval_table.groupby(["interval_name", "consonance_rank"], as_index=False)
+        .size()
+        .rename(columns={"size": "count"})
+        .sort_values(["consonance_rank", "interval_name"])
+        .reset_index(drop=True)
+    )
+    histogram["ratio"] = histogram["count"] / float(histogram["count"].sum())
+    return histogram
+
+
+def _build_measure_consonance_summary(vertical_interval_table: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "measure_number",
+        "vertical_interval_count",
+        "mean_consonance_rank",
+        "lowest_consonance_rank",
+        "highest_consonance_rank",
+        "consonant_interval_count",
+        "dissonant_interval_count",
+        "top_vertical_intervals",
+    ]
+    if vertical_interval_table.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, Any]] = []
+    for measure_number, frame in vertical_interval_table.groupby("measure_number", sort=True):
+        ranks = frame["consonance_rank"].astype(int)
+        rows.append(
+            {
+                "measure_number": int(measure_number),
+                "vertical_interval_count": int(len(frame)),
+                "mean_consonance_rank": round(float(ranks.mean()), 3),
+                "lowest_consonance_rank": int(ranks.min()),
+                "highest_consonance_rank": int(ranks.max()),
+                "consonant_interval_count": int((ranks <= 8).sum()),
+                "dissonant_interval_count": int((ranks >= 9).sum()),
+                "top_vertical_intervals": _top_counts(frame["interval_name"], 3),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _roman_is_dominant(roman_figure: str) -> bool:
@@ -2473,6 +2643,7 @@ def _build_summary_lines(
     unique_pitch_classes: int,
     pitch_class_histogram: pd.DataFrame,
     interval_class_histogram: pd.DataFrame,
+    vertical_interval_histogram: pd.DataFrame,
     harmony_table: pd.DataFrame,
     cadence_candidates: pd.DataFrame,
     theme_matches: pd.DataFrame,
@@ -2493,6 +2664,7 @@ def _build_summary_lines(
         f"共提取 {total_notes} 个音高事件，包含 {unique_pitches} 个不同音高、{unique_pitch_classes} 个不同音级类。",
         f"音级类重心：{_top_histogram_statement(pitch_class_histogram, 'pitch_class_label')}",
         f"主导音程序类：{_top_histogram_statement(interval_class_histogram, 'interval_class')}",
+        f"主导纵向音程：{_top_histogram_statement(vertical_interval_histogram, 'interval_name')}",
         f"共生成 {len(harmony_table)} 个和声切片，其中 {roman_count} 个切片得到了 Roman numeral 候选。",
         (
             f"共检测到 {len(cadence_candidates)} 个终止候选，其中完满终止 {pac_count} 个、半终止 {hc_count} 个。"
@@ -2526,6 +2698,9 @@ def build_symbolic_export_payload(
         "interval_table": result["interval_table"].to_dict(orient="records"),
         "interval_class_histogram": result["interval_class_histogram"].to_dict(orient="records"),
         "directed_interval_histogram": result["directed_interval_histogram"].to_dict(orient="records"),
+        "vertical_interval_table": result["vertical_interval_table"].to_dict(orient="records"),
+        "vertical_interval_histogram": result["vertical_interval_histogram"].to_dict(orient="records"),
+        "measure_consonance_summary": result["measure_consonance_summary"].to_dict(orient="records"),
         "harmony_table": (harmony_annotations if harmony_annotations is not None else result["harmony_table"]).to_dict(
             orient="records"
         ),

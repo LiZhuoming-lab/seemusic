@@ -8,8 +8,6 @@ from spectral_tool.analysis import build_audio_excerpt_wav, format_seconds, join
 from spectral_tool.assistant import (
     annotate_event_interaction_levels,
     annotate_event_similarity_groups,
-    build_assistant_overlay_component,
-    build_event_assistant_payload,
 )
 from spectral_tool.models.presets import EVENT_MODEL_PRESETS, OPERATION_RESULT_OPTIONS
 from spectral_tool.state.audio_state import (
@@ -359,16 +357,6 @@ def render_event_editor(
                 key=f"combined_operation_log_{analysis_key}",
             )
 
-    effective_label_text = effective_event_labels(active_row)
-    assistant_payload = build_event_assistant_payload(
-        active_row.to_dict(),
-        effective_label_text=effective_label_text,
-    )
-    components.html(
-        build_assistant_overlay_component(active_event_id, assistant_payload),
-        height=1,
-        scrolling=False,
-    )
     return annotations, active_event_id
 
 

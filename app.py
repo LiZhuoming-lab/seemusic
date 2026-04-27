@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from urllib.parse import quote
+
 import streamlit as st
 
 from spectral_tool.ui.audio_workspace import render_audio_workspace
@@ -8,13 +11,47 @@ from spectral_tool.ui.sidebar_audio import render_audio_sidebar
 from spectral_tool.ui.sidebar_score import render_score_sidebar
 
 
+def _background_image_data_uri() -> str:
+    asset_path = Path(__file__).parent / "spectral_tool" / "assets" / "ink_landscape.svg"
+    svg_text = asset_path.read_text(encoding="utf-8")
+    return f"data:image/svg+xml;utf8,{quote(svg_text)}"
+
+
 st.set_page_config(
-    page_title="音乐分析平台",
+    page_title='声相 “SeeMusic”',
     page_icon="🎼",
     layout="wide",
 )
+BACKGROUND_DATA_URI = _background_image_data_uri()
 
-st.title("音乐分析平台")
+st.markdown(
+    f"""
+    <style>
+    [data-testid="stAppViewContainer"] {{
+        background:
+            linear-gradient(rgba(247, 245, 240, 0.92), rgba(247, 245, 240, 0.95)),
+            url("{BACKGROUND_DATA_URI}") center 120px / min(120vw, 2200px) auto no-repeat fixed;
+        background-color: #f7f5f0;
+    }}
+    [data-testid="stHeader"] {{
+        background: rgba(247, 245, 240, 0.72);
+        backdrop-filter: blur(8px);
+    }}
+    [data-testid="stSidebar"] > div:first-child {{
+        background: rgba(252, 251, 247, 0.80);
+        backdrop-filter: blur(10px);
+    }}
+    [data-testid="stVerticalBlockBorderWrapper"] {{
+        background: rgba(255, 255, 255, 0.62);
+        backdrop-filter: blur(6px);
+        border-radius: 18px;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title('声相 “SeeMusic”')
 st.caption("保留原有声景 / 频谱事件分析，同时新增第一阶段乐谱符号分析工作台。")
 st.markdown("### 音乐分析交流可联系V：`Mendel_Dog`")
 if "workspace_mode" not in st.session_state:
