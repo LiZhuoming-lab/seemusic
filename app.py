@@ -18,7 +18,7 @@ def _background_image_data_uri() -> str:
 
 
 st.set_page_config(
-    page_title='声相 “SeeMusic”',
+    page_title="谱境研音 / Soundscape Analyse",
     page_icon="🎼",
     layout="wide",
 )
@@ -51,7 +51,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title('声相 “SeeMusic”')
+st.title("谱境研音 / Soundscape Analyse")
 st.caption("保留原有声景 / 频谱事件分析，同时新增第一阶段乐谱符号分析工作台。")
 st.markdown("### 音乐分析交流可联系V：`Mendel_Dog`")
 if "workspace_mode" not in st.session_state:
