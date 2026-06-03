@@ -38,7 +38,7 @@ def _fetch_json(url: str, repository_name: str = "When-in-Rome", retries: int = 
         url,
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "seemusic-when-in-rome-loader",
+            "User-Agent": "soundscape-analyse-when-in-rome-loader",
         },
     )
     last_error: Exception | None = None
@@ -111,7 +111,7 @@ def download_when_in_rome_score(path: str) -> tuple[bytes, str]:
     entry = _entry_from_tree_path(path)
     request = urllib.request.Request(
         entry["raw_url"],
-        headers={"User-Agent": "seemusic-when-in-rome-loader"},
+        headers={"User-Agent": "soundscape-analyse-when-in-rome-loader"},
     )
     last_error: Exception | None = None
     for attempt in range(3):

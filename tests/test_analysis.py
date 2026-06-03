@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Regression tests for the Soundscape Analyse audio-analysis pipeline."""
+
 import io
 import tempfile
 import unittest

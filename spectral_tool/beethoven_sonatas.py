@@ -38,7 +38,7 @@ def _fetch_json(url: str, repository_name: str = "Beethoven piano sonatas", retr
         url,
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "seemusic-beethoven-loader",
+            "User-Agent": "soundscape-analyse-beethoven-loader",
         },
     )
     last_error: Exception | None = None
@@ -112,7 +112,7 @@ def download_beethoven_sonata_score(path: str) -> tuple[bytes, str]:
     entry = _entry_from_tree_path(path)
     request = urllib.request.Request(
         str(entry["raw_url"]),
-        headers={"User-Agent": "seemusic-beethoven-loader"},
+        headers={"User-Agent": "soundscape-analyse-beethoven-loader"},
     )
     last_error: Exception | None = None
     for attempt in range(3):

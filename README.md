@@ -1,4 +1,4 @@
-# 音乐分析平台（音频 + 乐谱）
+# 谱境研音 / Soundscape Analyse：音乐分析平台（音频 + 乐谱）
 
 一个面向声景音乐、频谱音乐、传统作品与当代作品分析的本地研究工具。它的目标不是替代音乐学判断，而是先帮研究者把“哪里值得重点听、重点看、重点写”自动筛出来，并逐步把音频分析与乐谱分析纳入同一个工作台。
 
@@ -82,7 +82,7 @@
 
 ## 本地部署（推荐给同学）
 
-如果你想把 `seemusic` 部署到自己的个人电脑上，最稳妥的方式是：`下载代码 -> 创建虚拟环境 -> 安装依赖 -> 启动网页`。
+如果你想把 `Soundscape Analyse`（`谱境研音`）部署到自己的个人电脑上，最稳妥的方式是：`下载代码 -> 创建虚拟环境 -> 安装依赖 -> 启动网页`。
 
 ### 1. 准备环境
 
@@ -110,15 +110,15 @@ git --version
 推荐直接克隆仓库：
 
 ```bash
-git clone https://github.com/LiZhuoming-lab/seemusic.git
-cd seemusic
+git clone <你的仓库地址>
+cd <项目目录名>
 ```
 
 如果你已经配置过 SSH，也可以使用：
 
 ```bash
-git clone git@github.com:LiZhuoming-lab/seemusic.git
-cd seemusic
+git clone <你的 SSH 仓库地址>
+cd <项目目录名>
 ```
 
 ### 3. 创建虚拟环境
